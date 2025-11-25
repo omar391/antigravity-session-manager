@@ -1,1 +1,4 @@
 node_modules/
+.DS_Store
+element-cache.json
+debug-screenshot-*.png

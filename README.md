@@ -1,80 +1,94 @@
-# Antigravity Session Manager
+# Antigravity Session Manager (OCR-Enhanced)
 
-Auto-sync session manager for switching between multiple Google accounts in Antigravity IDE.
+Fully automated session manager for switching between multiple Google accounts in Antigravity IDE using OCR-based element detection.
 
 ## Features
 
+- ✅ **OCR-based automation** - Dynamically finds UI elements without hardcoded coordinates
+- ✅ **Smart caching** - Caches element positions for fast subsequent runs
 - ✅ **Auto-detection** - Automatically detects and stores sessions when you log in
-- ✅ **Smart syncing** - Updates sessions when data changes
+- ✅ **Fully automated** - Complete workflow from Settings to account selection
+- ✅ **Configurable** - Customize workflow via `automation-config.json`
 - ✅ **Round-robin switching** - Cycle through accounts with one command
-- ✅ **Global keybindings** - Works from any workspace
-- ✅ **Self-installing** - One command to install globally
+
+## Prerequisites
+
+The following tools are required (already available on macOS):
+- `cliclick` - For mouse automation (installable via Homebrew)
+- `tesseract` - For OCR text detection (installable via Homebrew)
+- `screencapture` - Built into macOS
 
 ## Installation
 
 ```bash
-cd /Users/omar/.gemini/antigravity/playground/obsidian-copernicus
+cd /Volumes/Projects/business/AstronLab/omar391/tools/antigravity-session-manager
 bun install
-bun session.ts
 ```
-
-This will:
-1. Copy the script to `~/.antigravity/scripts/`
-2. Install dependencies
-3. Set up global keybindings
-4. Configure Antigravity IDE
-
-**Reload Antigravity** (Cmd+Shift+P → "Reload Window") to activate.
 
 ## Usage
 
-### Keybindings (Recommended)
-
-- `Ctrl+Alt+N` - Next Session (auto-sync current + switch to next)
-- `Ctrl+Alt+L` - List All Sessions
-
-### Command Line
-
+### Switch to Next Session (Fully Automated)
 ```bash
-# Cycle to next session
-bun session.ts next
+# Switch to next session (automated)
+bun index.ts next
 
 # List all sessions
-bun session.ts list
+bun index.ts list
+
+# Sync current session to database
+bun index.ts sync
 
 # Load specific session
-bun session.ts load <email>
-
-# Manually sync current
-bun session.ts sync
+bun index.ts load <email>
 
 # Delete a session
-bun session.ts delete <email>
+bun index.ts delete <email>
 
-# Reinstall/update global keybindings
-bun session.ts
+# Clear OCR cache
+bun index.ts clear-cache
 ```
 
 ## How It Works
 
-### Auto-Detection
+1. **Session Detection**: Reads current Antigravity session from SQLite database
+2. **UI Automation**: Uses nut.js to
+creenshot** of the current screen
+2. **Runs Tesseract OCR** to detect all text with bounding boxes
+3. **Finds elements** using fuzzy text matching (handles slight variations)
+4. **Caches positions** in `element-cache.json` for performance
+5. **Clicks center** of detected element
 
-When you run `next`:
-1. Reads current session from Antigravity database
-2. Extracts email and auth data
-3. Checks if email exists in session database
-4. If new → adds to database
-5. If changed → updates database
-6. Loads next session in rotation
+### Workflow Configuration
 
-### Database
+The automation workflow is defined in `automation-config.json`:
+
+```json
+{
+  "workflow": {
+    "steps": [
+      { "action": "pressKey", "key": ",", "modifiers": "command" },
+      { "action": "wait", "ms": 1500 },
+      { "action": "findAndClick", "text": "Account" },
+      { "action": "wait", "ms": 800 },
+      { "action": "findAndClick", "text": "Sign Out" },
+      { "action": "wait", "ms": 1500 },
+      { "action": "findAndClick", "text": "Sign In" },
+      { "action": "wait", "ms": 2000 },
+      { "action": "findAndClick", "text": "{targetEmail}", "dynamic": true }
+    ]
+  }
+}
+```
+
+You can customize delays, add steps, or modify element names.
+
+### Session Database
 
 Sessions are stored in `~/.antigravity/sessions.db`:
 
 ```sql
 CREATE TABLE sessions (
     email TEXT PRIMARY KEY,
-    name TEXT,
     auth_status TEXT,      -- JSON blob
     google_data TEXT,      -- JSON blob
     last_used INTEGER,     -- Unix timestamp
@@ -83,44 +97,98 @@ CREATE TABLE sessions (
 );
 ```
 
+### Element Cache
+
+Element positions are cached in `element-cache.json`:
+
+```json
+{
+  "Account": {
+    "x": 150,
+    "y": 250,
+    "timestamp": 1700000000000
+  }
+}
+```
+
+Cache expires after 24 hours by default.
+
 ## Example Workflow
 
 1. **Log in** with Account A (personal@gmail.com)
-2. Press `Ctrl+Alt+N` → Saves Account A, stays on it (only 1 session)
+2. Run `bun session-manager.ts sync` to save it
 3. **Log out, log in** with Account B (work@gmail.com)
-4. Press `Ctrl+Alt+N` → Saves Account B, switches to Account A
-5. **Reload window** (Cmd+R)
-6. Now logged in as personal@gmail.com
-7. Press `Ctrl+Alt+N` → Switches to work@gmail.com
-8. Keep cycling!
-
-## Testing
-
-Run the test suite:
-
-```bash
-bun test session.test.ts
-```
-
-## Files
-
-- `session.ts` - Main script
-- `session.test.ts` - Unit tests
-- `package.json` - Dependencies
-- `~/.antigravity/sessions.db` - Session database
-- `~/Library/Application Support/Antigravity/User/keybindings.json` - Global keybindings
+4. Run `bun session-manager.ts next` →  
+   - Saves Account B
+   - Automatically switches to Account A
+   - Window reloads
+5. Run `bun session-manager.ts next` again →  
+   - Switches to Account B
+   - Much faster due to cached positions!
 
 ## Troubleshooting
 
-**Keybindings not working?**
-- Reload Antigravity window
-- Check `~/Library/Application Support/Antigravity/User/keybindings.json`
+### OCR Not Finding Elements?
 
-**Session not switching?**
-- Make sure to reload window (Cmd+R) after switching
-- Check `bun session.ts list` to verify sessions are saved
-
-**Want to start fresh?**
 ```bash
-rm ~/.antigravity/sessions.db
+# Clear cache to force fresh detection
+bun session-manager.ts clear-cache
+
+# Then try again
+bun session-manager.ts next
 ```
+
+### Elements Changed Position?
+
+The cache auto-expires after 24 hours, or clear it manually:
+
+```bash
+bun session-manager.ts clear-cache
+```
+
+### Want to Test OCR Detection?
+
+You can test individual components:
+
+```typescript
+import { findElement } from './ocr-utils';
+
+const element = await findElement('Account');
+console.log(element); // Shows detected position
+```
+
+### Automation Failing?
+
+1. Ensure Antigravity window is visible and focused
+2. Check that Settings dialog is accessible via Cmd+,
+3. Verify element text hasn't changed in UI
+4. Try adjusting fuzzy match threshold in `automation-config.json`
+
+## Files
+
+- `session-manager.ts` - Main unified script (replaces all 3 old files)
+- `ocr-utils.ts` - OCR and element detection utilities
+- `automation-config.json` - Workflow configuration
+- `element-cache.json` - Cached element positions (auto-generated)
+- `~/.antigravity/sessions.db` - Session database
+
+## Migration from Old Scripts
+
+The new `session-manager.ts` replaces:
+- ❌ `setup-settings-coords.ts` - No longer needed (OCR handles this)
+- ❌ `settings-click.ts` - Merged into `session-manager.ts`
+- ❌ `session.ts` - Merged into `session-manager.ts`
+- ❌ `settings-coords.json` - Replaced by `element-cache.json`
+
+You can safely delete the old files after confirming the new script works.
+
+## Advantages Over Old Approach
+
+| Old Approach | New OCR Approach |
+|--------------|------------------|
+| Manual coordinate setup | Automatic element detection |
+| Breaks when UI moves | Adapts to UI changes |
+| 2-step process (setup + run) | 1-step process (just run) |
+| Hardcoded positions | Dynamic detection |
+| Stops at sign-in | Full automation to account selection |
+

@@ -2,6 +2,8 @@
   "name": "session-manager",
   "version": "1.0.0",
   "dependencies": {
+    "@nut-tree-fork/nut-js": "^4.2.6",
+    "jimp": "^1.6.0",
     "jsonc-parser": "^3.3.1"
   },
   "devDependencies": {

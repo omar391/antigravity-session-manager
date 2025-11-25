@@ -1,0 +1,66 @@
+{
+    "workflow": {
+        "steps": [
+            {
+                "action": "pressKey",
+                "key": ",",
+                "modifiers": "command",
+                "description": "Open Settings"
+            },
+            {
+                "action": "wait",
+                "ms": 4000
+            },
+            {
+                "action": "clickAt",
+                "x": 365,
+                "y": 472,
+                "description": "Click Account button (hardcoded position)"
+            },
+            {
+                "action": "wait",
+                "ms": 3000
+            },
+            {
+                "action": "findAndClick",
+                "text": "out",
+                "cacheName": "signout_button",
+                "region": "right"
+            },
+            {
+                "action": "wait",
+                "ms": 1500
+            },
+            {
+                "action": "findAndClick",
+                "text": "Sign",
+                "cacheName": "signin_button"
+            },
+            {
+                "action": "wait",
+                "ms": 2000
+            },
+            {
+                "action": "findAndClick",
+                "text": "{targetEmail}",
+                "dynamic": true,
+                "description": "Click target account email"
+            },
+            {
+                "action": "wait",
+                "ms": 1000
+            }
+        ]
+    },
+    "ocr": {
+        "cacheEnabled": true,
+        "cacheLifetime": 86400000,
+        "fuzzyMatchThreshold": 0.8
+    },
+    "delays": {
+        "afterSettingsOpen": 1500,
+        "afterClick": 800,
+        "afterSignOut": 1500,
+        "afterSignIn": 2000
+    }
+}
