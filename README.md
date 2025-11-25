@@ -1,48 +1,52 @@
 # Antigravity Session Manager (OCR-Enhanced)
 
-Fully automated session manager for switching between multiple Google accounts in Antigravity IDE using OCR-based element detection.
+# Antigravity Session Manager
+
+Automated session switching for Antigravity using OCR-based UI automation with `nut.js`.
 
 ## Features
 
-- ✅ **OCR-based automation** - Dynamically finds UI elements without hardcoded coordinates
-- ✅ **Smart caching** - Caches element positions for fast subsequent runs
-- ✅ **Auto-detection** - Automatically detects and stores sessions when you log in
-- ✅ **Fully automated** - Complete workflow from Settings to account selection
-- ✅ **Configurable** - Customize workflow via `automation-config.json`
-- ✅ **Round-robin switching** - Cycle through accounts with one command
+- 🔄 Automatic session switching between multiple Google accounts
+- 🖱️ OCR-based UI element detection using Tesseract
+- ⌨️ Cross-platform automation with nut.js
+- 📂 Simple JSON-based email configuration
+- 🎯 Retina display support with automatic DPI scaling
 
-## Prerequisites
+## Project Structure
 
-The following tools are required (already available on macOS):
-- `cliclick` - For mouse automation (installable via Homebrew)
-- `tesseract` - For OCR text detection (installable via Homebrew)
-- `screencapture` - Built into macOS
+```
+antigravity-session-manager/
+├── index.ts                    # Main CLI entry point
+├── emails.json                # Email list configuration
+├── src/
+│   ├── types.ts               # TypeScript interfaces
+│   ├── automation.ts          # UI automation (keyboard, mouse, focus)
+│   ├── workflow.ts            # Workflow execution engine
+│   └── ocr.ts                 # OCR text detection and caching
+├── automation-config.json     # Workflow configuration
+└── package.json
+```
 
 ## Installation
 
 ```bash
-cd /Volumes/Projects/business/AstronLab/omar391/tools/antigravity-session-manager
 bun install
 ```
 
 ## Usage
 
-### Switch to Next Session (Fully Automated)
 ```bash
-# Switch to next session (automated)
+# Switch to next email (automated)
 bun index.ts next
 
-# List all sessions
+# List configured emails
 bun index.ts list
 
-# Sync current session to database
-bun index.ts sync
+# Add a new email
+bun index.ts add user@gmail.com
 
-# Load specific session
-bun index.ts load <email>
-
-# Delete a session
-bun index.ts delete <email>
+# Remove an email
+bun index.ts remove user@gmail.com
 
 # Clear OCR cache
 bun index.ts clear-cache
@@ -50,7 +54,7 @@ bun index.ts clear-cache
 
 ## How It Works
 
-1. **Session Detection**: Reads current Antigravity session from SQLite database
+1. **Configuration**: Reads email list from `emails.json`
 2. **UI Automation**: Uses nut.js to
 creenshot** of the current screen
 2. **Runs Tesseract OCR** to detect all text with bounding boxes

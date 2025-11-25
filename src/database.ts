@@ -18,8 +18,6 @@ export function initSessionDB(): Database {
         CREATE TABLE IF NOT EXISTS sessions (
             email TEXT PRIMARY KEY,
             name TEXT,
-            auth_status TEXT,
-            google_data TEXT,
             last_used INTEGER,
             created_at INTEGER,
             updated_at INTEGER
@@ -29,27 +27,23 @@ export function initSessionDB(): Database {
     return db;
 }
 
-export function getCurrentSession(): { email: string; auth_status: string; google_data: string } | null {
+export function getCurrentSession(): { email: string; name: string } | null {
     if (!fs.existsSync(AG_DB_PATH)) return null;
 
     try {
         const agDb = new Database(AG_DB_PATH, { readonly: true });
-        const authRow = agDb.query('SELECT value FROM ItemTable WHERE key = ?').get('ant igravityAuthStatus') as { value: string } | null;
-        const googleRow = agDb.query('SELECT value FROM ItemTable WHERE key = ?').get('google.antigravity') as { value: string } | null;
+        const authRow = agDb.query('SELECT value FROM ItemTable WHERE key = ?').get('antigravityAuthStatus') as { value: string } | null;
         agDb.close();
 
         if (!authRow) return null;
 
         const authData = JSON.parse(authRow.value);
         const email = authData.email;
+        const name = authData.name || email;
 
         if (!email) return null;
 
-        return {
-            email,
-            auth_status: authRow.value,
-            google_data: googleRow?.value || '{}'
-        };
+        return { email, name };
     } catch (e) {
         console.error('Error parsing current session:', e);
         return null;
@@ -70,21 +64,21 @@ export function syncCurrent(): void {
     const existing = db.query('SELECT * FROM sessions WHERE email = ?').get(current.email) as Session | null;
 
     if (existing) {
-        if (existing.auth_status !== current.auth_status || existing.google_data !== current.google_data) {
+        if (existing.name !== current.name) {
             db.query(`
                 UPDATE sessions 
-                SET auth_status = ?, google_data = ?, updated_at = ?
+                SET name = ?, updated_at = ?
                 WHERE email = ?
-            `).run(current.auth_status, current.google_data, now, current.email);
+            `).run(current.name, now, current.email);
             console.log(`✅ Updated session for: ${current.email}`);
         } else {
             console.log(`✓ Session for ${current.email} is already up to date.`);
         }
     } else {
         db.query(`
-            INSERT INTO sessions (email, auth_status, google_data, last_used, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-        `).run(current.email, current.auth_status, current.google_data, 0, now, now);
+            INSERT INTO sessions (email, name, last_used, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+        `).run(current.email, current.name, 0, now, now);
         console.log(`🆕 Added new session: ${current.email}`);
     }
 
@@ -136,21 +130,4 @@ export function deleteSession(email: string): void {
     db.query('DELETE FROM sessions WHERE email = ?').run(email);
     db.close();
     console.log(`🗑️  Deleted session: ${email}`);
-}
-
-export function updateLastUsed(email: string): void {
-    const db = initSessionDB();
-    db.query('UPDATE sessions SET last_used = ? WHERE email = ?').run(Date.now(), email);
-    db.close();
-}
-
-export function writeToDB(email: string, authStatus: string, googleData: string): void {
-    const agDb = new Database(AG_DB_PATH);
-    agDb.query('UPDATE ItemTable SET value = ? WHERE key = ?').run(authStatus, 'antigravityAuthStatus');
-    agDb.query('UPDATE ItemTable SET value = ? WHERE key = ?').run(googleData, 'google.antigravity');
-    agDb.close();
-
-    const db = initSessionDB();
-    updateLastUsed(email);
-    db.close();
 }

@@ -1,8 +1,6 @@
 export interface Session {
     email: string;
     name?: string;
-    auth_status: string;
-    google_data: string;
     last_used: number;
     created_at: number;
     updated_at: number;

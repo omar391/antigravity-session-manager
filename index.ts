@@ -1,34 +1,31 @@
 #!/usr/bin/env bun
 import { clearCache } from './src/ocr';
-import { syncCurrent, getCurrentSession, getNextSession, listSessions, deleteSession, initSessionDB, writeToDB } from './src/database';
+import { syncCurrent, getCurrentSession, getNextSession, listSessions, initSessionDB } from './src/database';
 import { focusAntigravity, pressKey, wait } from './src/automation';
 import { executeWorkflow } from './src/workflow';
-import { Database } from 'bun:sqlite';
-import * as path from 'path';
-import * as os from 'os';
-
-const AG_DB_PATH = path.join(os.homedir(), 'Library', 'Application Support', 'Antigravity', 'User', 'globalStorage', 'state.vscdb');
+import type { Session } from './src/types';
 
 async function switchToNext(): Promise<void> {
-    console.log('🔄 Syncing current session...');
+    // Sync current session first (auto-detect and save)
+    console.log('🔄 Detecting current session...');
     syncCurrent();
 
     const current = getCurrentSession();
     const nextSession = getNextSession(current?.email);
 
     if (!nextSession) {
-        console.log('📭 No sessions available. Please log in first.');
+        console.log('📭 No sessions available yet. Please log in to Antigravity with a Google account, then run this command again.');
         return;
     }
 
     if (current && nextSession.email === current.email) {
-        console.log(`ℹ️  Already on the only available session: ${current.email}`);
+        console.log(`ℹ️  Only one session available: ${current.email}`);
+        console.log(`   Log in to another Google account in Antigravity, then run 'bun index.ts next' to add it to rotation.`);
         return;
     }
 
-    const authData = JSON.parse(nextSession.auth_status);
     console.log(`\n🔄 Current: ${current?.email || 'none'}`);
-    console.log(`➡️  Next: ${authData.name} (${nextSession.email})\n`);
+    console.log(`➡️  Next: ${nextSession.name || nextSession.email} (${nextSession.email})\n`);
 
     // Execute automation workflow
     console.log('🤖 Starting automated workflow...\n');
@@ -40,20 +37,13 @@ async function switchToNext(): Promise<void> {
     const success = await executeWorkflow(nextSession.email);
 
     if (!success) {
-        console.error('\n❌ Automation failed. Please try again or clear cache with: bun session-manager.ts clear-cache');
+        console.error('\n❌ Automation failed. Please try again or clear cache with: bun index.ts clear-cache');
         return;
     }
 
-    // Wait for OAuth to complete
-    console.log('\n⏳ Waiting for OAuth to complete...');
+    // Wait for OAuth and window to settle
+    console.log('\n⏳ Waiting for session to settle...');
     await wait(3000);
-
-    // Write session to database (bypass Google chooser)
-    console.log('⚡ Writing session to database...');
-    const agDb = new Database(AG_DB_PATH);
-    agDb.query('INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)').run('antigravityAuthStatus', nextSession.auth_status);
-    agDb.query('INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)').run('google.antigravity', nextSession.google_data);
-    agDb.close();
 
     // Close any OAuth windows
     console.log('🔄 Closing OAuth window...');
@@ -63,8 +53,13 @@ async function switchToNext(): Promise<void> {
     // Reload window
     console.log('🔄 Reloading window...');
     await pressKey('r', 'command');
+    await wait(2000); // Wait for reload
 
-    // Update last_used
+    // Auto-detect and save the new session
+    console.log('💾 Auto-saving new session...');
+    syncCurrent();
+
+    // Update last_used for the session we switched to
     const db = initSessionDB();
     db.query('UPDATE sessions SET last_used = ? WHERE email = ?').run(Date.now(), nextSession.email);
     db.close();
@@ -72,27 +67,16 @@ async function switchToNext(): Promise<void> {
     console.log(`\n✅ Switched to: ${nextSession.email}\n`);
 }
 
-function loadSession(email: string): void {
+function removeEmail(email: string): void {
     const db = initSessionDB();
-    const session = db.query('SELECT * FROM sessions WHERE email = ?').get(email) as any;
-
-    if (!session) {
-        console.error(`❌ Session not found: ${email}`);
-        db.close();
-        return;
-    }
-
-    const agDb = new Database(AG_DB_PATH);
-    agDb.query('INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)').run('antigravityAuthStatus', session.auth_status);
-    agDb.query('INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)').run('google.antigravity', session.google_data);
-    agDb.close();
-
-    const now = Date.now();
-    db.query('UPDATE sessions SET last_used = ? WHERE email = ?').run(now, email);
+    const result = db.query('DELETE FROM sessions WHERE email = ?').run(email);
     db.close();
 
-    console.log(`✅ Loaded session: ${email}`);
-    console.log(`⚠️  Please reload the window (Cmd+R) to apply changes.`);
+    if (result.changes === 0) {
+        console.error(`❌ Email not found: ${email}`);
+    } else {
+        console.log(`🗑️  Removed email: ${email}`);
+    }
 }
 
 // ============================================================================
@@ -108,28 +92,16 @@ const arg = process.argv[3];
             await switchToNext();
             break;
 
-        case 'sync':
-            syncCurrent();
-            break;
-
         case 'list':
             listSessions();
             break;
 
-        case 'load':
+        case 'remove':
             if (!arg) {
-                console.error('Usage: bun session-manager.ts load <email>');
+                console.error('Usage: bun index.ts remove <email>');
                 process.exit(1);
             }
-            loadSession(arg);
-            break;
-
-        case 'delete':
-            if (!arg) {
-                console.error('Usage: bun session-manager.ts delete <email>');
-                process.exit(1);
-            }
-            deleteSession(arg);
+            removeEmail(arg);
             break;
 
         case 'clear-cache':
@@ -141,12 +113,16 @@ const arg = process.argv[3];
 Antigravity Session Manager
 
 Usage:
-  bun session-manager.ts next          Switch to next session
-  bun session-manager.ts sync          Sync current session
-  bun session-manager.ts list          List all sessions
-  bun session-manager.ts load <email>  Load specific session
-  bun session-manager.ts delete <email> Delete session
-  bun session-manager.ts clear-cache   Clear OCR cache
+  bun index.ts next             Switch to next session (auto-detects and saves new accounts)
+  bun index.ts list             List all sessions
+  bun index.ts remove <email>   Remove email from rotation
+  bun index.ts clear-cache      Clear OCR cache
+
+How it works:
+  1. Log in to a Google account in Antigravity
+  2. Run 'bun index.ts next' - it will auto-detect and save it
+  3. Repeat for other accounts - they'll be added automatically
+  4. Future 'next' commands will rotate through all saved accounts
             `.trim());
             break;
     }
