@@ -37,7 +37,8 @@ export async function pressKey(key: string, modifiers?: string): Promise<void> {
         'down': Key.Down,
         'up': Key.Up,
         'left': Key.Left,
-        'right': Key.Right
+        'right': Key.Right,
+        'w': Key.W
     };
 
     const nutKey = keyMap[key.toLowerCase()] || keyMap[key];

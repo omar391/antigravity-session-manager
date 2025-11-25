@@ -1,9 +1,12 @@
 #!/usr/bin/env bun
 import { clearCache } from './src/ocr';
-import { syncCurrent, getCurrentSession, getNextSession, listSessions, initSessionDB } from './src/database';
+import { syncCurrent, getCurrentSession, getNextSession, listSessions, initSessionDB, deleteSession } from './src/database';
 import { focusAntigravity, pressKey, wait } from './src/automation';
 import { executeWorkflow } from './src/workflow';
 import type { Session } from './src/types';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as os from 'os';
 
 async function switchToNext(): Promise<void> {
     // Sync current session first (auto-detect and save)
@@ -41,22 +44,8 @@ async function switchToNext(): Promise<void> {
         return;
     }
 
-    // Wait for OAuth and window to settle
-    console.log('\n⏳ Waiting for session to settle...');
-    await wait(3000);
-
-    // Close any OAuth windows
-    console.log('🔄 Closing OAuth window...');
-    await pressKey('53'); // ESC
-    await wait(300);
-
-    // Reload window
-    console.log('🔄 Reloading window...');
-    await pressKey('r', 'command');
-    await wait(2000); // Wait for reload
-
     // Auto-detect and save the new session
-    console.log('💾 Auto-saving new session...');
+    console.log('\n💾 Auto-saving new session...');
     syncCurrent();
 
     // Update last_used for the session we switched to
@@ -67,16 +56,81 @@ async function switchToNext(): Promise<void> {
     console.log(`\n✅ Switched to: ${nextSession.email}\n`);
 }
 
-function removeEmail(email: string): void {
-    const db = initSessionDB();
-    const result = db.query('DELETE FROM sessions WHERE email = ?').run(email);
-    db.close();
+function setupKeybindings(): void {
+    const KEYBINDINGS_PATH = path.join(os.homedir(), 'Library', 'Application Support', 'Antigravity', 'User', 'keybindings.json');
+    const GLOBAL_SCRIPTS_DIR = path.join(os.homedir(), '.antigravity', 'scripts');
 
-    if (result.changes === 0) {
-        console.error(`❌ Email not found: ${email}`);
-    } else {
-        console.log(`🗑️  Removed email: ${email}`);
+    // Create global scripts directory
+    if (!fs.existsSync(GLOBAL_SCRIPTS_DIR)) {
+        fs.mkdirSync(GLOBAL_SCRIPTS_DIR, { recursive: true });
     }
+
+    // Copy this script and dependencies to global location
+    const currentDir = process.cwd();
+    const filesToCopy = ['index.ts', 'workflow.json', 'package.json', 'bun.lock'];
+
+    console.log('📦 Installing to global location...');
+
+    for (const file of filesToCopy) {
+        const sourcePath = path.join(currentDir, file);
+        const destPath = path.join(GLOBAL_SCRIPTS_DIR, file);
+
+        if (fs.existsSync(sourcePath)) {
+            fs.copyFileSync(sourcePath, destPath);
+            console.log(`  ✓ Copied ${file}`);
+        }
+    }
+
+    // Copy src directory
+    const srcSource = path.join(currentDir, 'src');
+    const srcDest = path.join(GLOBAL_SCRIPTS_DIR, 'src');
+
+    if (fs.existsSync(srcSource)) {
+        if (fs.existsSync(srcDest)) {
+            fs.rmSync(srcDest, { recursive: true, force: true });
+        }
+        fs.cpSync(srcSource, srcDest, { recursive: true });
+        console.log('  ✓ Copied src/');
+    }
+
+    // Copy node_modules if exists
+    const nodeModulesSource = path.join(currentDir, 'node_modules');
+    const nodeModulesDest = path.join(GLOBAL_SCRIPTS_DIR, 'node_modules');
+
+    if (fs.existsSync(nodeModulesSource)) {
+        if (fs.existsSync(nodeModulesDest)) {
+            fs.rmSync(nodeModulesDest, { recursive: true, force: true });
+        }
+        fs.cpSync(nodeModulesSource, nodeModulesDest, { recursive: true });
+        console.log('  ✓ Copied node_modules');
+    }
+
+    // Setup keybindings
+    const keybindings = [
+        {
+            key: "ctrl+alt+n",
+            command: "workbench.action.terminal.sendSequence",
+            args: {
+                text: "cd ~/.antigravity/scripts && bun index.ts next\n"
+            }
+        },
+        {
+            key: "ctrl+alt+l",
+            command: "workbench.action.terminal.sendSequence",
+            args: {
+                text: "cd ~/.antigravity/scripts && bun index.ts list\n"
+            }
+        }
+    ];
+
+    fs.writeFileSync(KEYBINDINGS_PATH, JSON.stringify(keybindings, null, 2));
+
+    console.log('\n✅ Installation complete!');
+    console.log(`\n📍 Installed to: ${GLOBAL_SCRIPTS_DIR}`);
+    console.log('\nKeybindings:');
+    console.log('  Ctrl+Alt+N - Next Session');
+    console.log('  Ctrl+Alt+L - List Sessions');
+    console.log('\n⚠️  Please reload Antigravity window to activate keybindings.');
 }
 
 // ============================================================================
@@ -96,12 +150,8 @@ const arg = process.argv[3];
             listSessions();
             break;
 
-        case 'remove':
-            if (!arg) {
-                console.error('Usage: bun index.ts remove <email>');
-                process.exit(1);
-            }
-            removeEmail(arg);
+        case 'init':
+            setupKeybindings();
             break;
 
         case 'clear-cache':
@@ -115,7 +165,7 @@ Antigravity Session Manager
 Usage:
   bun index.ts next             Switch to next session (auto-detects and saves new accounts)
   bun index.ts list             List all sessions
-  bun index.ts remove <email>   Remove email from rotation
+  bun index.ts init             Install global keybindings (Ctrl+Alt+N, Ctrl+Alt+L)
   bun index.ts clear-cache      Clear OCR cache
 
 How it works:

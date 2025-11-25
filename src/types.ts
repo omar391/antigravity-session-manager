@@ -7,13 +7,15 @@ export interface Session {
 }
 
 export interface WorkflowStep {
-    action: 'pressKey' | 'wait' | 'findAndClick' | 'openSettings' | 'type' | 'clickAt';
+    action: 'pressKey' | 'wait' | 'findAndClick' | 'findAndClickAny' | 'openSettings' | 'type' | 'clickAt';
     key?: string;
     modifiers?: string;
     ms?: number;
     text?: string;
+    texts?: string[];  // For findAndClickAny - try multiple texts
     cacheName?: string;
     dynamic?: boolean;
+    optional?: boolean; // If true, don't fail workflow if not found
     description?: string;
     region?: string;
     x?: number;

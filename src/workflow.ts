@@ -5,12 +5,12 @@ import { findElementCached } from './ocr';
 import { clickAt, pressKey, openSettings, wait } from './automation';
 import type { Config, WorkflowStep } from './types';
 
-const CONFIG_FILE = path.join(process.cwd(), 'automation-config.json');
+const CONFIG_FILE = path.join(process.cwd(), 'workflow.json');
 
 export async function executeWorkflow(targetEmail: string): Promise<boolean> {
     // Load configuration
     if (!fs.existsSync(CONFIG_FILE)) {
-        console.error('❌ Configuration file not found: automation-config.json');
+        console.error('❌ Configuration file not found: workflow.json');
         return false;
     }
 
@@ -86,6 +86,43 @@ export async function executeWorkflow(targetEmail: string): Promise<boolean> {
                     }
 
                     await clickAt(position.x, position.y);
+                    break;
+
+                case 'findAndClickAny':
+                    if (step.description) {
+                        console.log(`🖱️  ${step.description}...`);
+                    }
+
+                    let foundPosition = null;
+                    let foundText = '';
+
+                    for (const textOption of step.texts!) {
+                        console.log(`🔍 Trying to find: "${textOption}"...`);
+                        const pos = await findElementCached(
+                            step.cacheName || textOption,
+                            textOption,
+                            useCache,
+                            step.region
+                        );
+
+                        if (pos) {
+                            foundPosition = pos;
+                            foundText = textOption;
+                            break;
+                        }
+                    }
+
+                    if (!foundPosition) {
+                        if (step.optional) {
+                            console.log(`⚠️  Optional step skipped: Could not find any of: ${step.texts!.join(', ')}`);
+                            break;
+                        }
+                        console.error(`❌ Could not find any of: ${step.texts!.join(', ')}`);
+                        return false;
+                    }
+
+                    console.log(`✅ Found: "${foundText}"`);
+                    await clickAt(foundPosition.x, foundPosition.y);
                     break;
             }
         } catch (error) {
