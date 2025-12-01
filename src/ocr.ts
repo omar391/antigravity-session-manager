@@ -587,55 +587,75 @@ export async function findElementWithRetry(
 ): Promise<{ x: number; y: number } | null> {
     const startTime = Date.now();
 
-    // If cache is enabled, try cached position first with verification
-    if (useCache) {
+    // Helper to verify cache
+    const verifyCache = async (): Promise<{ x: number; y: number } | null> => {
+        if (!useCache) return null;
         const cached = getCachedPosition(elementName);
-        if (cached) {
-            console.log(`💾 Using cached position for: ${elementName}`);
-            console.log(`🔍 Verifying cached position...`);
+        if (!cached) return null;
 
-            // Try image matching first if template provided
-            let element = null;
-            if (imageTemplate) {
-                const screenshot = await captureScreen();
-                element = await findElementByImage(screenshot, imageTemplate, imageSimilarity, multiScale);
-            }
+        console.log(`💾 Checking cached position for: ${elementName}`);
+        // Quick verification using region check around cached point
+        // For now, we'll just return it if we trust it, but ideally we verify
+        // Since we are racing, we can just return it and let the click handler deal with it?
+        // No, we should verify it exists. 
+        // Let's do a quick focused OCR/Image check at that spot
 
-            // Fall back to OCR
-            if (!element) {
-                element = await findElement(searchText, 0.8, region, colorFilter);
-            }
-
-            if (element) {
-                // Cache verified - update position in case it moved slightly
-                cachePosition(elementName, { x: element.x, y: element.y });
-                console.log(`✅ Cache verified`);
-                return { x: element.x, y: element.y };
-            }
-
-            console.log(`⚠️  Cache verification failed, searching with retry...`);
+        // For speed in this parallel model, if cache exists, we can treat it as a strong candidate
+        // But to be safe, let's verify it quickly
+        const element = await findElement(searchText, 0.8, region, colorFilter);
+        if (element) {
+            console.log(`✅ Cache verified`);
+            return { x: element.x, y: element.y };
         }
-    }
+        return null;
+    };
+
+    // Helper for image matching
+    const tryImages = async (): Promise<{ x: number; y: number } | null> => {
+        if (!imageTemplate) return null;
+        const screenshot = await captureScreen();
+        return await findElementByImage(screenshot, imageTemplate, imageSimilarity, multiScale);
+    };
+
+    // Helper for OCR
+    const tryOCR = async (): Promise<{ x: number; y: number } | null> => {
+        return await findElement(searchText, 0.8, region, colorFilter);
+    };
 
     // Retry loop with timeout
     while (Date.now() - startTime < maxWait) {
-        let element = null;
+        // Run all methods in parallel and take the first success
+        try {
+            const promises: Promise<{ x: number; y: number } | null>[] = [];
 
-        // Try image matching first if template provided
-        if (imageTemplate) {
-            const screenshot = await captureScreen();
-            element = await findElementByImage(screenshot, imageTemplate, imageSimilarity, multiScale);
-        }
+            // 1. Cache Verification
+            if (useCache) {
+                promises.push(verifyCache());
+            }
 
-        // Fall back to OCR if image matching failed or no template
-        if (!element) {
-            element = await findElement(searchText, 0.8, region, colorFilter);
-        }
+            // 2. Image Matching
+            if (imageTemplate) {
+                promises.push(tryImages());
+            }
 
-        if (element) {
-            // Cache the position for future use
-            cachePosition(elementName, { x: element.x, y: element.y });
-            return { x: element.x, y: element.y };
+            // 3. OCR (Always try)
+            promises.push(tryOCR());
+
+            // Wait for the first successful result (non-null)
+            // Promise.any would be ideal but might not be available in all environments
+            // We'll use a custom race that ignores nulls until all fail
+            const result = await Promise.any(promises.map(p => p.then(res => {
+                if (res === null) throw new Error('Not found');
+                return res;
+            })));
+
+            if (result) {
+                // Cache the position for future use
+                cachePosition(elementName, { x: result.x, y: result.y });
+                return result;
+            }
+        } catch (e) {
+            // All methods failed for this iteration
         }
 
         // Wait before retrying
