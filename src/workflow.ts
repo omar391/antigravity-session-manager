@@ -1,13 +1,20 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { keyboard } from "@nut-tree-fork/nut-js";
-import { findElementCached, findElementWithRetry } from './ocr';
+import { findElementWithRetry } from './ocr';
 import { clickAt, pressKey, openSettings, wait } from './automation';
+import { captureTemplateForStep, saveTemplateToWorkflow } from './template-learner';
 import type { Config, WorkflowStep } from './types';
 
 const CONFIG_FILE = path.join(process.cwd(), 'workflow.json');
 
-export async function executeWorkflow(targetEmail: string): Promise<boolean> {
+export async function executeWorkflow(
+    steps: WorkflowStep[],
+    targetEmail: string,
+    useCache: boolean = true,
+    learnMode: boolean = false
+): Promise<boolean> {
+    console.log('🤖 Starting automated workflow...');
     // Load configuration
     if (!fs.existsSync(CONFIG_FILE)) {
         console.error('❌ Configuration file not found: workflow.json');
@@ -15,7 +22,7 @@ export async function executeWorkflow(targetEmail: string): Promise<boolean> {
     }
 
     const config: Config = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8'));
-    const useCache = config.ocr.cacheEnabled;
+    // const useCache = config.ocr.cacheEnabled; // This line is commented out as useCache is now a parameter
 
     console.log('');
 
@@ -95,6 +102,39 @@ export async function executeWorkflow(targetEmail: string): Promise<boolean> {
                     );
 
                     if (!position) {
+                        // LEARNING MODE HOOK
+                        if (learnMode && step.stepID) {
+                            const template = await captureTemplateForStep(step.stepID);
+                            if (template) {
+                                // Save to file
+                                const workflowPath = path.join(process.cwd(), 'workflow.json');
+                                saveTemplateToWorkflow(step.stepID, template, workflowPath);
+
+                                // Update local step and retry
+                                step.imageTemplate = template;
+                                step.imageSimilarity = 0.85; // Default
+
+                                console.log(`🔄 Retrying step "${step.stepID}" with new template...`);
+                                const retryPos = await findElementWithRetry(
+                                    cacheKey,
+                                    searchText,
+                                    false, // Don't use cache for retry
+                                    step.region,
+                                    maxWaitTime,
+                                    retryIntervalTime,
+                                    step.colorFilter,
+                                    step.imageTemplate,
+                                    step.imageSimilarity,
+                                    step.multiScale
+                                );
+
+                                if (retryPos) {
+                                    await clickAt(retryPos.x, retryPos.y);
+                                    break;
+                                }
+                            }
+                        }
+
                         console.error(`❌ Could not find element: "${searchText}" (timeout: ${maxWaitTime}ms)`);
                         return false;
                     }
