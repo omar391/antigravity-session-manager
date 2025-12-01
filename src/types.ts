@@ -8,14 +8,18 @@ export interface Session {
 
 export interface WorkflowStep {
     action: 'pressKey' | 'wait' | 'findAndClick' | 'findAndClickAny' | 'openSettings' | 'type' | 'clickAt';
+    stepID?: string;    // Unique ID for this step (used as cache key)
     key?: string;
     modifiers?: string;
     ms?: number;
     text?: string;
     texts?: string[];  // For findAndClickAny - try multiple texts
-    cacheName?: string;
     dynamic?: boolean;
     optional?: boolean; // If true, don't fail workflow if not found
+    useCache?: boolean;  // Whether to use cache, default true
+    maxWait?: number;    // Max time to wait for element (ms), default 5000
+    retryInterval?: number; // Time between retries (ms), default 500
+    colorFilter?: string;  // Hex color code (e.g., "#007AFF") with optional tolerance suffix (e.g., "#007AFF:0.4")
     description?: string;
     region?: string;
     x?: number;

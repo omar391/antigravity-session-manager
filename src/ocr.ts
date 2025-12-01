@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { screen, imageToJimp } from "@nut-tree-fork/nut-js";
+import { Jimp } from 'jimp';
 
 const CACHE_FILE = path.join(process.cwd(), 'element-cache.json');
 const TEMP_DIR = path.join(os.tmpdir(), 'antigravity-ocr');
@@ -186,18 +187,110 @@ function stringSimilarity(str1: string, str2: string): number {
 }
 
 /**
+ * Parse hex color code to RGB
+ * @param hex Color code (e.g., "#007AFF" or "#007AFF:0.4" with tolerance)
+ * @returns RGB values and optional tolerance
+ */
+function parseHexColor(hex: string): { r: number, g: number, b: number, tolerance: number } {
+    // Check for tolerance suffix
+    let colorPart = hex;
+    let tolerance = 0.3; // default
+
+    if (hex.includes(':')) {
+        const parts = hex.split(':');
+        colorPart = parts[0];
+        tolerance = parseFloat(parts[1]) || 0.3;
+    }
+
+    // Remove # if present
+    colorPart = colorPart.replace('#', '');
+
+    // Parse RGB
+    const r = parseInt(colorPart.substring(0, 2), 16);
+    const g = parseInt(colorPart.substring(2, 4), 16);
+    const b = parseInt(colorPart.substring(4, 6), 16);
+
+    return { r, g, b, tolerance };
+}
+
+/**
+ * Check if a pixel matches the target color within tolerance
+ */
+function isColorMatch(
+    pixelR: number,
+    pixelG: number,
+    pixelB: number,
+    targetR: number,
+    targetG: number,
+    targetB: number,
+    tolerance: number
+): boolean {
+    const maxDiff = 255 * tolerance;
+
+    const rDiff = Math.abs(pixelR - targetR);
+    const gDiff = Math.abs(pixelG - targetG);
+    const bDiff = Math.abs(pixelB - targetB);
+
+    // All channels must be within tolerance
+    return rDiff <= maxDiff && gDiff <= maxDiff && bDiff <= maxDiff;
+}
+
+/**
+ * Check if OCR result is on a background matching the target color
+ * @param hex Hex color code (e.g., "#007AFF" or "#007AFF:0.4")
+ */
+function isTextOnColorBackground(
+    jimp: any,
+    result: OCRResult,
+    hex: string,
+    sampleSize: number = 10
+): boolean {
+    const { r: targetR, g: targetG, b: targetB, tolerance } = parseHexColor(hex);
+    let matchingPixelCount = 0;
+    const totalSamples = sampleSize * sampleSize;
+
+    // Sample pixels around the text position
+    for (let dx = 0; dx < sampleSize; dx++) {
+        for (let dy = 0; dy < sampleSize; dy++) {
+            const x = Math.floor(result.x - sampleSize / 2 + dx);
+            const y = Math.floor(result.y - sampleSize / 2 + dy);
+
+            // Check bounds
+            if (x < 0 || y < 0 || x >= jimp.width || y >= jimp.height) continue;
+
+            // Get pixel from bitmap data
+            const idx = (y * jimp.width + x) * 4;
+            const r = jimp.bitmap.data[idx];
+            const g = jimp.bitmap.data[idx + 1];
+            const b = jimp.bitmap.data[idx + 2];
+
+            if (isColorMatch(r, g, b, targetR, targetG, targetB, tolerance)) {
+                matchingPixelCount++;
+            }
+        }
+    }
+
+    // If more than 30% of sampled pixels match, consider it a match
+    return matchingPixelCount / totalSamples > 0.3;
+}
+
+
+/**
  * Find an element by text using OCR
  * @param searchText Text to search for
  * @param threshold Minimum similarity threshold (0-1)
- * @param region Optional region to search within (e.g., "left", "right", "top", "bottom")
+ * @param region Optional region to search within (e.g., "left", "right", "top", "bottom", "center")
+ * @param colorFilter Optional hex color code (e.g., "#007AFF" or "#007AFF:0.4" with tolerance)
  * @returns Element position or null if not found
  */
 export async function findElement(
     searchText: string,
     threshold: number = 0.8,
-    region?: string
+    region?: string,
+    colorFilter?: string
 ): Promise<ElementPosition | null> {
-    console.log(`🔍 Searching for: "${searchText}"${region ? ` (Region: ${region})` : ''}`);
+    const colorInfo = colorFilter ? parseHexColor(colorFilter) : null;
+    console.log(`🔍 Searching for: "${searchText}"${region ? ` (Region: ${region})` : ''}${colorInfo ? ` (Color: ${colorFilter})` : ''}`);
 
     // Capture screenshot
     const debugMode = process.env.DEBUG_OCR === '1';
@@ -222,39 +315,52 @@ export async function findElement(
 
         // Filter by region if specified
         if (region && ocrResults.length > 0) {
+            const debugMode = process.env.DEBUG_OCR === '1';
+            const jimp = await Jimp.read(screenshotPath);
+            const screenWidth = jimp.width;
+            const screenHeight = jimp.height;
+
+            if (debugMode) {
+                console.log(`Screen dimensions: ${screenWidth}x${screenHeight}`);
+            }
+
             const originalCount = ocrResults.length;
-
-            // Calculate bounds once before filtering
-            const minX = Math.min(...ocrResults.map(r => r.x));
-            const maxX = Math.max(...ocrResults.map(r => r.x + r.width));
-            const maxY = Math.max(...ocrResults.map(r => r.y + r.height));
-
             ocrResults = ocrResults.filter(result => {
                 switch (region.toLowerCase()) {
-                    case 'left':
-                        // Settings sidebar: within first 3200px from leftmost content
-                        // (very wide for Retina displays - sidebar appears around x=3000px)
-                        return result.x < minX + 3200;
                     case 'right':
-                        return result.x > (2 * maxX) / 3;
-                    case 'center':
-                        const centerMinX = minX + (maxX - minX) / 3;
-                        const centerMaxX = minX + (2 * (maxX - minX)) / 3;
-                        return result.x > centerMinX && result.x < centerMaxX;
+                        return result.x > screenWidth / 2;
+                    case 'left':
+                        return result.x < screenWidth / 2;
                     case 'top':
-                        return result.y < maxY / 3;
+                        return result.y < screenHeight / 2;
                     case 'bottom':
-                        return result.y > (2 * maxY) / 3;
+                        return result.y > screenHeight / 2;
+                    case 'center':
+                        // Middle 50% of screen (25%-75% on each axis)
+                        return result.x > screenWidth * 0.25 && result.x < screenWidth * 0.75 &&
+                            result.y > screenHeight * 0.25 && result.y < screenHeight * 0.75;
                     default:
-                        return true;
+                        return true; // Unknown region, don't filter
                 }
             });
 
-            if (debugMode) {
+            if (ocrResults.length > 0) {
                 console.log(`🔍 Filtered to ${ocrResults.length} elements in ${region} region (from ${originalCount})`);
                 if (ocrResults.length > 0 && ocrResults.length <= 20) {
                     console.log('Filtered region texts:', ocrResults.map(r => r.text).join(', '));
                 }
+            }
+        }
+
+        // Filter by color if specified
+        if (colorFilter && ocrResults.length > 0) {
+            const jimp = await Jimp.read(screenshotPath);
+            const originalCount = ocrResults.length;
+
+            ocrResults = ocrResults.filter(result => isTextOnColorBackground(jimp, result, colorFilter));
+
+            if (ocrResults.length > 0) {
+                console.log(`🔍 Filtered to ${ocrResults.length} elements on target color background (from ${originalCount})`);
             }
         }
 
@@ -397,7 +503,8 @@ export async function findElementCached(
     elementName: string,
     searchText: string,
     useCache: boolean = true,
-    region?: string
+    region?: string,
+    colorFilter?: string
 ): Promise<{ x: number; y: number } | null> {
     // Try cache first
     if (useCache) {
@@ -408,7 +515,7 @@ export async function findElementCached(
     }
 
     // Find element using OCR
-    const element = await findElement(searchText, 0.8, region);
+    const element = await findElement(searchText, 0.8, region, colorFilter);
     if (!element) {
         return null;
     }
@@ -417,4 +524,67 @@ export async function findElementCached(
     cachePosition(elementName, { x: element.x, y: element.y });
 
     return { x: element.x, y: element.y };
+}
+
+/**
+ * Find element with retry logic and auto-wait
+ * @param elementName Name for caching
+ * @param searchText Text to search for
+ * @param useCache Whether to use cached position
+ * @param region Optional region to search within
+ * @param maxWait Maximum time to wait for element (ms), default 5000
+ * @param retryInterval Time between retries (ms), default 500
+ * @returns Element position or null
+ */
+export async function findElementWithRetry(
+    elementName: string,
+    searchText: string,
+    useCache: boolean = true,
+    region?: string,
+    maxWait: number = 5000,
+    retryInterval: number = 500,
+    colorFilter?: string
+): Promise<{ x: number; y: number } | null> {
+    const startTime = Date.now();
+
+    // If cache is enabled, try cached position first with verification
+    if (useCache) {
+        const cached = getCachedPosition(elementName);
+        if (cached) {
+            console.log(`💾 Using cached position for: ${elementName}`);
+            console.log(`🔍 Verifying cached position...`);
+
+            // Verify the element is still there
+            const element = await findElement(searchText, 0.8, region, colorFilter);
+            if (element) {
+                // Cache verified - update position in case it moved slightly
+                cachePosition(elementName, { x: element.x, y: element.y });
+                console.log(`✅ Cache verified`);
+                return { x: element.x, y: element.y };
+            }
+
+            console.log(`⚠️  Cache verification failed, searching with retry...`);
+        }
+    }
+
+    // Retry loop with timeout
+    while (Date.now() - startTime < maxWait) {
+        const element = await findElement(searchText, 0.8, region, colorFilter);
+
+        if (element) {
+            // Cache the position for future use
+            cachePosition(elementName, { x: element.x, y: element.y });
+            return { x: element.x, y: element.y };
+        }
+
+        // Wait before retrying
+        const elapsed = Date.now() - startTime;
+        if (elapsed < maxWait) {
+            const waitTime = Math.min(retryInterval, maxWait - elapsed);
+            await new Promise(resolve => setTimeout(resolve, waitTime));
+        }
+    }
+
+    // Timeout - element not found
+    return null;
 }

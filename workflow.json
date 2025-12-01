@@ -2,63 +2,54 @@
     "workflow": {
         "steps": [
             {
+                "stepID": "open_settings",
                 "action": "pressKey",
                 "key": ",",
                 "modifiers": "command",
                 "description": "Open Settings"
             },
             {
-                "action": "wait",
-                "ms": 200
-            },
-            {
+                "stepID": "click_account",
                 "action": "clickAt",
                 "x": 365,
                 "y": 472,
                 "description": "Click Account button (hardcoded position)"
             },
             {
-                "action": "wait",
-                "ms": 200
-            },
-            {
+                "stepID": "signout_button",
                 "action": "findAndClick",
                 "text": "out",
-                "cacheName": "signout_button",
-                "region": "right"
+                "region": "right",
+                "maxWait": 3000
             },
             {
-                "action": "wait",
-                "ms": 100
-            },
-            {
+                "stepID": "signin_button",
                 "action": "findAndClick",
                 "text": "Sign",
-                "cacheName": "signin_button"
+                "region": "right",
+                "colorFilter": "#007AFF:0.4",
+                "maxWait": 3000
             },
             {
-                "action": "wait",
-                "ms": 2000
-            },
-            {
+                "stepID": "target_email",
                 "action": "findAndClick",
                 "text": "{targetEmail}",
                 "dynamic": true,
-                "cacheName": "{targetEmail}",
-                "description": "Click target account email"
+                "description": "Click target account email",
+                "region": "center",
+                "useCache": false,
+                "maxWait": 10000
             },
             {
-                "action": "wait",
-                "ms": 2000
-            },
-            {
+                "stepID": "oauth_signin",
                 "action": "findAndClickAny",
                 "texts": [
                     "Sign in",
                     "সাইন-ইন করুন"
                 ],
                 "description": "Click Sign In (English or Bangla)",
-                "optional": true
+                "optional": true,
+                "maxWait": 5000
             },
             {
                 "action": "wait",
@@ -70,21 +61,6 @@
                 "key": "w",
                 "modifiers": "command",
                 "description": "Close OAuth window"
-            },
-            {
-                "action": "wait",
-                "ms": 50
-            },
-            {
-                "action": "pressKey",
-                "key": "r",
-                "modifiers": "command",
-                "description": "Reload window"
-            },
-            {
-                "action": "wait",
-                "ms": 200,
-                "description": "Wait for reload"
             }
         ]
     },

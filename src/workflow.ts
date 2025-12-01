@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { keyboard } from "@nut-tree-fork/nut-js";
-import { findElementCached } from './ocr';
+import { findElementCached, findElementWithRetry } from './ocr';
 import { clickAt, pressKey, openSettings, wait } from './automation';
 import type { Config, WorkflowStep } from './types';
 
@@ -73,15 +73,26 @@ export async function executeWorkflow(targetEmail: string): Promise<boolean> {
                         console.log(`🔍 Finding and clicking: "${searchText}"...`);
                     }
 
-                    const position = await findElementCached(
-                        step.cacheName || searchText,
+                    // Use stepID as cache key, fallback to searchText
+                    const cacheKey = step.stepID || searchText;
+
+                    // Default useCache to true
+                    const shouldUseCache = step.useCache !== false && useCache;
+                    const maxWaitTime = step.maxWait || 5000;
+                    const retryIntervalTime = step.retryInterval || 500;
+
+                    const position = await findElementWithRetry(
+                        cacheKey,
                         searchText,
-                        useCache,
-                        step.region
+                        shouldUseCache,
+                        step.region,
+                        maxWaitTime,
+                        retryIntervalTime,
+                        step.colorFilter
                     );
 
                     if (!position) {
-                        console.error(`❌ Could not find element: "${searchText}"`);
+                        console.error(`❌ Could not find element: "${searchText}" (timeout: ${maxWaitTime}ms)`);
                         return false;
                     }
 
@@ -89,30 +100,38 @@ export async function executeWorkflow(targetEmail: string): Promise<boolean> {
                     break;
 
                 case 'findAndClickAny':
+                    const textOptions = step.texts!;
+
                     if (step.description) {
                         console.log(`🖱️  ${step.description}...`);
                     }
 
-                    let foundPosition = null;
-                    let foundText = '';
-
-                    for (const textOption of step.texts!) {
+                    let found = false;
+                    for (const textOption of textOptions) {
                         console.log(`🔍 Trying to find: "${textOption}"...`);
-                        const pos = await findElementCached(
-                            step.cacheName || textOption,
+
+                        // Use stepID as cache key, fallback to textOption
+                        const cacheKey = step.stepID || textOption;
+                        const shouldUseCache = step.useCache !== false && useCache;
+                        const maxWaitTime = step.maxWait || 5000;
+
+                        const pos = await findElementWithRetry(
+                            cacheKey,
                             textOption,
-                            useCache,
-                            step.region
+                            shouldUseCache,
+                            step.region,
+                            maxWaitTime
                         );
 
                         if (pos) {
-                            foundPosition = pos;
-                            foundText = textOption;
+                            console.log(`✅ Found: "${textOption}"`);
+                            await clickAt(pos.x, pos.y);
+                            found = true;
                             break;
                         }
                     }
 
-                    if (!foundPosition) {
+                    if (!found) {
                         if (step.optional) {
                             console.log(`⚠️  Optional step skipped: Could not find any of: ${step.texts!.join(', ')}`);
                             break;
@@ -120,9 +139,6 @@ export async function executeWorkflow(targetEmail: string): Promise<boolean> {
                         console.error(`❌ Could not find any of: ${step.texts!.join(', ')}`);
                         return false;
                     }
-
-                    console.log(`✅ Found: "${foundText}"`);
-                    await clickAt(foundPosition.x, foundPosition.y);
                     break;
             }
         } catch (error) {
