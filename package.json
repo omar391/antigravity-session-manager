@@ -2,12 +2,10 @@
   "name": "session-manager",
   "version": "1.0.0",
   "scripts": {
-    "start": "bun index.ts",
     "next": "bun index.ts next",
-    "next:learn": "bun index.ts next --learn",
+    "learn": "bun index.ts next --learn",
     "list": "bun index.ts list",
-    "init": "bun index.ts init",
-    "clean": "bun index.ts clear-cache"
+    "init": "bun index.ts init"
   },
   "dependencies": {
     "@nut-tree-fork/nut-js": "^4.2.6",
