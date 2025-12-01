@@ -88,7 +88,10 @@ export async function executeWorkflow(targetEmail: string): Promise<boolean> {
                         step.region,
                         maxWaitTime,
                         retryIntervalTime,
-                        step.colorFilter
+                        step.colorFilter,
+                        step.imageTemplate,
+                        step.imageSimilarity,
+                        step.multiScale
                     );
 
                     if (!position) {

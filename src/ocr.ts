@@ -4,6 +4,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { screen, imageToJimp } from "@nut-tree-fork/nut-js";
 import { Jimp } from 'jimp';
+import { loadBase64Image, findTemplateInImage, findTemplateMultiScale } from './image-matcher';
 
 const CACHE_FILE = path.join(process.cwd(), 'element-cache.json');
 const TEMP_DIR = path.join(os.tmpdir(), 'antigravity-ocr');
@@ -212,6 +213,42 @@ function parseHexColor(hex: string): { r: number, g: number, b: number, toleranc
 
     return { r, g, b, tolerance };
 }
+
+/**
+ * Find element by image template matching
+ * @param screenshotPath Path to screenshot
+ * @param imageTemplate base64 encoded template image
+ * @param similarity Similarity threshold (0-1), default 0.85
+ * @param multiScale Whether to try multiple scales
+ * @returns Element position or null
+ */
+export async function findElementByImage(
+    screenshotPath: string,
+    imageTemplate: string,
+    similarity: number = 0.85,
+    multiScale: boolean = false
+): Promise<{ x: number; y: number } | null> {
+    try {
+        // Load template
+        const template = await loadBase64Image(imageTemplate);
+
+        // Find match
+        const match = multiScale
+            ? await findTemplateMultiScale(screenshotPath, template, similarity)
+            : await findTemplateInImage(screenshotPath, template, similarity);
+
+        if (match) {
+            console.log(`🖼️  Image match found at (${match.x}, ${match.y}) [similarity: ${match.similarity.toFixed(2)}]`);
+            return { x: match.x, y: match.y };
+        }
+
+        return null;
+    } catch (error) {
+        console.error(`❌ Image matching error: ${error}`);
+        return null;
+    }
+}
+
 
 /**
  * Check if a pixel matches the target color within tolerance
@@ -543,7 +580,10 @@ export async function findElementWithRetry(
     region?: string,
     maxWait: number = 5000,
     retryInterval: number = 500,
-    colorFilter?: string
+    colorFilter?: string,
+    imageTemplate?: string,
+    imageSimilarity?: number,
+    multiScale?: boolean
 ): Promise<{ x: number; y: number } | null> {
     const startTime = Date.now();
 
@@ -554,8 +594,18 @@ export async function findElementWithRetry(
             console.log(`💾 Using cached position for: ${elementName}`);
             console.log(`🔍 Verifying cached position...`);
 
-            // Verify the element is still there
-            const element = await findElement(searchText, 0.8, region, colorFilter);
+            // Try image matching first if template provided
+            let element = null;
+            if (imageTemplate) {
+                const screenshot = await captureScreen();
+                element = await findElementByImage(screenshot, imageTemplate, imageSimilarity, multiScale);
+            }
+
+            // Fall back to OCR
+            if (!element) {
+                element = await findElement(searchText, 0.8, region, colorFilter);
+            }
+
             if (element) {
                 // Cache verified - update position in case it moved slightly
                 cachePosition(elementName, { x: element.x, y: element.y });
@@ -569,7 +619,18 @@ export async function findElementWithRetry(
 
     // Retry loop with timeout
     while (Date.now() - startTime < maxWait) {
-        const element = await findElement(searchText, 0.8, region, colorFilter);
+        let element = null;
+
+        // Try image matching first if template provided
+        if (imageTemplate) {
+            const screenshot = await captureScreen();
+            element = await findElementByImage(screenshot, imageTemplate, imageSimilarity, multiScale);
+        }
+
+        // Fall back to OCR if image matching failed or no template
+        if (!element) {
+            element = await findElement(searchText, 0.8, region, colorFilter);
+        }
 
         if (element) {
             // Cache the position for future use
