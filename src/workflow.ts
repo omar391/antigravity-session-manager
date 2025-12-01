@@ -88,18 +88,41 @@ export async function executeWorkflow(
                     const maxWaitTime = step.maxWait || 5000;
                     const retryIntervalTime = step.retryInterval || 500;
 
-                    const position = await findElementWithRetry(
-                        cacheKey,
-                        searchText,
-                        shouldUseCache,
-                        step.region,
-                        maxWaitTime,
-                        retryIntervalTime,
-                        step.colorFilter,
-                        step.imageTemplate,
-                        step.imageSimilarity,
-                        step.multiScale
-                    );
+                    // Try multiple image templates if provided (like findAndClickAny)
+                    let position = null;
+                    const templatesToTry = step.imageTemplates || (step.imageTemplate ? [step.imageTemplate] : []);
+
+                    if (templatesToTry.length > 0) {
+                        for (const template of templatesToTry) {
+                            position = await findElementWithRetry(
+                                cacheKey,
+                                searchText,
+                                shouldUseCache,
+                                step.region,
+                                maxWaitTime,
+                                retryIntervalTime,
+                                step.colorFilter,
+                                template,
+                                step.imageSimilarity,
+                                step.multiScale
+                            );
+                            if (position) break;
+                        }
+                    } else {
+                        // No image templates, use OCR only
+                        position = await findElementWithRetry(
+                            cacheKey,
+                            searchText,
+                            shouldUseCache,
+                            step.region,
+                            maxWaitTime,
+                            retryIntervalTime,
+                            step.colorFilter,
+                            undefined,
+                            step.imageSimilarity,
+                            step.multiScale
+                        );
+                    }
 
                     if (!position) {
                         // LEARNING MODE HOOK

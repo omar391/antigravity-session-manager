@@ -15,6 +15,7 @@ export interface WorkflowStep {
     text?: string;
     texts?: string[];  // For findAndClickAny - try multiple texts
     imageTemplate?: string;  // base64 encoded PNG template for image matching
+    imageTemplates?: string[];  // Try multiple image templates (like texts)
     imageSimilarity?: number;  // Similarity threshold (0-1), default 0.85
     multiScale?: boolean;  // Try multiple scales for resolution independence
     dynamic?: boolean;
