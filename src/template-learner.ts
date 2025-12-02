@@ -4,6 +4,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { spawnSync } from 'child_process';
 
+
 /**
  * Interactively capture a template for a specific step
  * @param stepID The ID of the step being learned
@@ -68,7 +69,7 @@ export function saveTemplateToWorkflow(stepID: string, dataUrl: string, workflow
                     step.imageTemplate = dataUrl;
                     // Set default similarity if not present
                     if (!step.imageSimilarity) {
-                        step.imageSimilarity = 0.85;
+                        step.imageSimilarity = 0.85; // Default threshold
                     }
                     updated = true;
                     break;
@@ -89,3 +90,48 @@ export function saveTemplateToWorkflow(stepID: string, dataUrl: string, workflow
         return false;
     }
 }
+
+/**
+ * Update workflow step with matched similarity and cached coordinates
+ */
+export function updateStepAfterMatch(
+    stepID: string,
+    matchedSimilarity: number,
+    x: number,
+    y: number,
+    workflowPath: string
+): boolean {
+    try {
+        const content = fs.readFileSync(workflowPath, 'utf-8');
+        const json = JSON.parse(content);
+
+        let updated = false;
+
+        if (json.workflow && Array.isArray(json.workflow.steps)) {
+            for (const step of json.workflow.steps) {
+                if (step.stepID === stepID) {
+                    // Only update similarity if step has an image template
+                    if (step.imageTemplate || step.imageTemplates) {
+                        step.imageSimilarity = matchedSimilarity;
+                    }
+                    // Always save cached coordinates
+                    step.cachedX = x;
+                    step.cachedY = y;
+                    updated = true;
+                    break;
+                }
+            }
+        }
+
+        if (updated) {
+            fs.writeFileSync(workflowPath, JSON.stringify(json, null, 4));
+            console.log(`💾 Updated step \"${stepID}\" with similarity=${matchedSimilarity.toFixed(2)}, x=${x}, y=${y}`);
+            return true;
+        }
+        return false;
+    } catch (error) {
+        console.error('❌ Failed to update workflow step:', error);
+        return false;
+    }
+}
+

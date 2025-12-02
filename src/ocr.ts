@@ -5,18 +5,19 @@ import * as os from 'os';
 import { screen, imageToJimp } from "@nut-tree-fork/nut-js";
 import { Jimp } from 'jimp';
 import { loadBase64Image, findTemplateInImage, findTemplateMultiScale } from './image-matcher';
+import type { Config, ElementPosition } from './types';
+import { getEffectiveConfig } from './constants';
 
 const CACHE_FILE = path.join(process.cwd(), 'element-cache.json');
+const CONFIG_FILE = path.join(process.cwd(), 'workflow.json');
 const TEMP_DIR = path.join(os.tmpdir(), 'antigravity-ocr');
 
-export interface ElementPosition {
-    x: number;
-    y: number;
-    width: number;
-    height: number;
-    text: string;
-    confidence?: number;
-    timestamp?: number;
+/**
+ * Load configuration from workflow.json
+ */
+function loadConfig(): Config {
+    const rawConfig = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8'));
+    return getEffectiveConfig(rawConfig);
 }
 
 export interface OCRResult {
@@ -225,17 +226,21 @@ function parseHexColor(hex: string): { r: number, g: number, b: number, toleranc
 export async function findElementByImage(
     screenshotPath: string,
     imageTemplate: string,
-    similarity: number = 0.85,
-    multiScale: boolean = false
+    similarity: number,
+    multiScale: boolean,
+    config: Config
 ): Promise<{ x: number; y: number } | null> {
     try {
         // Load template
         const template = await loadBase64Image(imageTemplate);
 
-        // Find match
-        const match = multiScale
-            ? await findTemplateMultiScale(screenshotPath, template, similarity)
-            : await findTemplateInImage(screenshotPath, template, similarity);
+        let match: { x: number; y: number; similarity: number } | null = null;
+        // Try multi-scale matching if enabled
+        if (multiScale) {
+            match = await findTemplateMultiScale(screenshotPath, template, similarity, config.ocr.scales, config.ocr.stepSize);
+        } else {
+            match = await findTemplateInImage(screenshotPath, template, similarity, config.ocr.stepSize);
+        }
 
         if (match) {
             console.log(`🖼️  Image match found at (${match.x}, ${match.y}) [similarity: ${match.similarity.toFixed(2)}]`);
@@ -318,26 +323,27 @@ function isTextOnColorBackground(
  * @param threshold Minimum similarity threshold (0-1)
  * @param region Optional region to search within (e.g., "left", "right", "top", "bottom", "center")
  * @param colorFilter Optional hex color code (e.g., "#007AFF" or "#007AFF:0.4" with tolerance)
+ * @param screenshotPath Optional path to an existing screenshot to use instead of capturing a new one
  * @returns Element position or null if not found
  */
 export async function findElement(
     searchText: string,
-    threshold: number = 0.8,
+    minConfidence: number,
     region?: string,
-    colorFilter?: string
+    colorFilter?: string,
+    screenshotPath?: string
 ): Promise<ElementPosition | null> {
+    const startTime = Date.now();
     const colorInfo = colorFilter ? parseHexColor(colorFilter) : null;
     console.log(`🔍 Searching for: "${searchText}"${region ? ` (Region: ${region})` : ''}${colorInfo ? ` (Color: ${colorFilter})` : ''}`);
 
-    // Capture screenshot
     const debugMode = process.env.DEBUG_OCR === '1';
-    let screenshotPath: string;
 
     if (debugMode) {
         screenshotPath = path.join(process.cwd(), `debug-screenshot-${Date.now()}.png`);
         await captureScreen(screenshotPath);
         console.log(`📸 Debug screenshot saved: ${screenshotPath}`);
-    } else {
+    } else if (!screenshotPath) {
         screenshotPath = await captureScreen();
     }
 
@@ -416,7 +422,7 @@ export async function findElement(
             // Also check if search text is contained in the detected text
             const containsMatch = result.text.toLowerCase().includes(searchText.toLowerCase());
 
-            if (similarity > bestSimilarity && similarity >= threshold) {
+            if (similarity > bestSimilarity && similarity >= minConfidence) {
                 bestSimilarity = similarity;
                 bestMatch = result;
             } else if (containsMatch && similarity > 0.6) {
@@ -450,8 +456,10 @@ export async function findElement(
         return null;
 
     } finally {
-        // Cleanup screenshot (unless in debug mode)
-        if (!debugMode && fs.existsSync(screenshotPath)) {
+        // Cleanup screenshot ONLY if we created it (not if it was passed to us)
+        // This prevents race conditions when multiple detection methods share the same screenshot
+        const weCreatedScreenshot = !arguments[4]; // screenshotPath parameter
+        if (!debugMode && weCreatedScreenshot && fs.existsSync(screenshotPath)) {
             fs.unlinkSync(screenshotPath);
         }
     }
@@ -564,22 +572,37 @@ export async function findElementCached(
 }
 
 /**
- * Find element with retry logic and auto-wait
- * @param elementName Name for caching
- * @param searchText Text to search for
- * @param useCache Whether to use cached position
- * @param region Optional region to search within
- * @param maxWait Maximum time to wait for element (ms), default 5000
- * @param retryInterval Time between retries (ms), default 500
- * @returns Element position or null
+ * Find an element on screen with retry logic and dynamic similarity decay.
+ * 
+ * Implements a progressive relaxation strategy for image template matching:
+ * - Starts with high precision (default 0.99, configurable via workflow.json)
+ * - Decreases by a decay rate (default 0.05, configurable) on each retry
+ * - Respects minimum similarity threshold (step-level or global default)
+ * 
+ * Tries three detection methods in parallel on each iteration:
+ * 1. Cache verification (if useCache=true)
+ * 2. Image template matching (if imageTemplate provided)
+ * 3. OCR text detection (always)
+ * 
+ * @param elementName - Cache key for this element
+ * @param searchText - Text to search for via OCR
+ * @param useCache - Whether to check cached positions (default: true)
+ * @param region - Screen region to search ('left' | 'right' | 'center')
+ * @param maxWait - Maximum wait time in milliseconds (default: 5000)
+ * @param retryInterval - Delay between retries in milliseconds (default: 500)
+ * @param colorFilter - Optional color filter (e.g., "#007AFF:0.4")
+ * @param imageTemplate - Base64 encoded PNG template for image matching
+ * @param imageSimilarity - Minimum similarity threshold (0-1), overrides global default
+ * @param multiScale - Try multiple scales for resolution independence
+ * @returns Position {x, y} if found, null otherwise
  */
 export async function findElementWithRetry(
     elementName: string,
     searchText: string,
-    useCache: boolean = true,
-    region?: string,
-    maxWait: number = 5000,
-    retryInterval: number = 500,
+    useCache: boolean,
+    region: string | undefined,
+    maxWait: number,
+    retryInterval: number,
     colorFilter?: string,
     imageTemplate?: string,
     imageSimilarity?: number,
@@ -587,59 +610,60 @@ export async function findElementWithRetry(
 ): Promise<{ x: number; y: number } | null> {
     const startTime = Date.now();
 
-    // Helper to verify cache
-    const verifyCache = async (): Promise<{ x: number; y: number } | null> => {
-        if (!useCache) return null;
-        const cached = getCachedPosition(elementName);
-        if (!cached) return null;
-
-        console.log(`💾 Checking cached position for: ${elementName}`);
-        // Quick verification using region check around cached point
-        // For now, we'll just return it if we trust it, but ideally we verify
-        // Since we are racing, we can just return it and let the click handler deal with it?
-        // No, we should verify it exists. 
-        // Let's do a quick focused OCR/Image check at that spot
-
-        // For speed in this parallel model, if cache exists, we can treat it as a strong candidate
-        // But to be safe, let's verify it quickly
-        const element = await findElement(searchText, 0.8, region, colorFilter);
-        if (element) {
-            console.log(`✅ Cache verified`);
-            return { x: element.x, y: element.y };
-        }
-        return null;
-    };
+    // Note: Cache verification is handled by workflow.ts using cachedX/cachedY fields
+    // This function only performs element detection
 
     // Helper for image matching
-    const tryImages = async (): Promise<{ x: number; y: number } | null> => {
+    const tryImages = async (screenshotPath: string): Promise<{ x: number; y: number } | null> => {
         if (!imageTemplate) return null;
-        const screenshot = await captureScreen();
-        return await findElementByImage(screenshot, imageTemplate, imageSimilarity, multiScale);
+        return await findElementByImage(screenshotPath, imageTemplate, imageSimilarity || config.ocr.defaultThreshold, multiScale || false, config);
     };
 
     // Helper for OCR
-    const tryOCR = async (): Promise<{ x: number; y: number } | null> => {
-        return await findElement(searchText, 0.8, region, colorFilter);
+    const tryOCR = async (screenshotPath: string): Promise<{ x: number; y: number } | null> => {
+        return await findElement(searchText, config.ocr.minConfidence, region, colorFilter, screenshotPath);
     };
 
+    // Load config values for dynamic similarity (lazy loaded and cached)
+    let config: Config;
+    try {
+        config = loadConfig();
+    } catch (e) {
+        // Fallback to defaults if config can't be loaded (e.g., in tests)
+        config = getEffectiveConfig({});
+    }
+    const initialSimilarity = config.ocr.initialSimilarity;
+    const decayRate = config.ocr.decayRate;
+    const defaultMinSimilarity = config.ocr.minSimilarity;
+
     // Retry loop with timeout
+    let currentSimilarity = initialSimilarity;
+    const minSimilarity = imageSimilarity || defaultMinSimilarity;
+
     while (Date.now() - startTime < maxWait) {
-        // Run all methods in parallel and take the first success
+        // Capture screen ONCE for this iteration
+        let screenshotPath: string;
+        try {
+            screenshotPath = await captureScreen();
+        } catch (e) {
+            console.error('❌ Failed to capture screen:', e);
+            // Wait before retrying capture
+            await new Promise(resolve => setTimeout(resolve, retryInterval));
+            continue;
+        }
+
+        // Run all methods in parallel using the SAME screenshot
         try {
             const promises: Promise<{ x: number; y: number } | null>[] = [];
 
-            // 1. Cache Verification
-            if (useCache) {
-                promises.push(verifyCache());
-            }
-
-            // 2. Image Matching
+            // 1. Image Matching
             if (imageTemplate) {
-                promises.push(tryImages());
+                // Use current dynamic similarity
+                promises.push(findElementByImage(screenshotPath, imageTemplate, currentSimilarity, multiScale || false, config));
             }
 
             // 3. OCR (Always try)
-            promises.push(tryOCR());
+            promises.push(tryOCR(screenshotPath));
 
             // Wait for the first successful result (non-null)
             // Promise.any would be ideal but might not be available in all environments
@@ -650,12 +674,28 @@ export async function findElementWithRetry(
             })));
 
             if (result) {
-                // Cache the position for future use
-                cachePosition(elementName, { x: result.x, y: result.y });
+                // Note: Position caching is handled by workflow.ts using cachedX/cachedY fields
+                // Clean up screenshot before returning
+                if (fs.existsSync(screenshotPath)) {
+                    fs.unlinkSync(screenshotPath);
+                }
                 return result;
             }
         } catch (e) {
             // All methods failed for this iteration
+        }
+
+        // Clean up screenshot after attempts
+        if (fs.existsSync(screenshotPath)) {
+            fs.unlinkSync(screenshotPath);
+        }
+
+        // Decrease similarity for next iteration if using image template
+        if (imageTemplate) {
+            currentSimilarity = Math.max(currentSimilarity - decayRate, minSimilarity);
+            if (currentSimilarity > minSimilarity) {
+                console.log(`📉 Decreasing image similarity to ${currentSimilarity.toFixed(2)}`);
+            }
         }
 
         // Wait before retrying

@@ -28,15 +28,37 @@ export interface WorkflowStep {
     region?: string;
     x?: number;
     y?: number;
+    cachedX?: number;  // Cached x coordinate from last successful match
+    cachedY?: number;  // Cached y coordinate from last successful match
 }
 
 export interface Config {
     workflow: {
         steps: WorkflowStep[];
+        // Global workflow settings
+        maxWait: number;           // Default 5000ms
+        retryInterval: number;     // Default 500ms
     };
     ocr: {
-        cacheEnabled: boolean;
-        cacheLifetime: number;
-        fuzzyMatchThreshold: number;
+        // OCR & Image Matching settings
+        initialSimilarity: number;      // Default 0.99
+        minSimilarity: number;          // Default 0.7
+        decayRate: number;              // Default 0.05
+        defaultThreshold: number;       // Default 0.85
+        stepSize: number;               // Default 5
+        scales: number[];               // Default [0.8, 0.9, 1.0, 1.1, 1.2]
+        minConfidence: number;          // Default 0.8
+        learningModeRetryTimeout: number; // Default 20000ms
+        cacheEnabled: boolean;          // Default true
     };
+}
+
+export interface ElementPosition {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    text: string;
+    confidence: number;
+    timestamp: number;
 }

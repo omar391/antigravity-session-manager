@@ -67,21 +67,21 @@ function calculateSimilarity(
  */
 export async function findTemplateInImage(
     screenshotPath: string,
-    templateImage: any,
-    similarityThreshold: number = 0.85,
-    stepSize: number = 5
+    template: any,
+    similarityThreshold: number,
+    stepSize: number
 ): Promise<TemplateMatch | null> {
     const screenshot = await Jimp.read(screenshotPath);
 
-    const templateWidth = templateImage.width;
-    const templateHeight = templateImage.height;
+    const templateWidth = template.width;
+    const templateHeight = template.height;
 
     let bestMatch: TemplateMatch | null = null;
 
     // Sliding window search
     for (let y = 0; y <= screenshot.height - templateHeight; y += stepSize) {
         for (let x = 0; x <= screenshot.width - templateWidth; x += stepSize) {
-            const similarity = calculateSimilarity(screenshot, templateImage, x, y);
+            const similarity = calculateSimilarity(screenshot, template, x, y);
 
             if (similarity >= similarityThreshold) {
                 if (!bestMatch || similarity > bestMatch.similarity) {
@@ -108,9 +108,10 @@ export async function findTemplateInImage(
  */
 export async function findTemplateMultiScale(
     screenshotPath: string,
-    templateImage: any,
-    similarityThreshold: number = 0.85,
-    scales: number[] = [0.8, 0.9, 1.0, 1.1, 1.2]
+    template: any,
+    similarityThreshold: number,
+    scales: number[],
+    stepSize: number
 ): Promise<TemplateMatch | null> {
     let bestMatch: TemplateMatch | null = null;
 
@@ -118,18 +119,13 @@ export async function findTemplateMultiScale(
         // Skip if scale is 1.0 (already tried)
         if (Math.abs(scale - 1.0) < 0.01 && bestMatch) continue;
 
-        // Scale template
-        const scaledTemplate = templateImage.clone();
-        const newWidth = Math.round(templateImage.width * scale);
-        const newHeight = Math.round(templateImage.height * scale);
-        scaledTemplate.resize({ w: newWidth, h: newHeight });
+        const scaledTemplate = template.clone();
+        scaledTemplate.resize({
+            w: Math.floor(template.width * scale),
+            h: Math.floor(template.height * scale)
+        });
 
-        // Try to find
-        const match = await findTemplateInImage(
-            screenshotPath,
-            scaledTemplate,
-            similarityThreshold
-        );
+        const match = await findTemplateInImage(screenshotPath, scaledTemplate, similarityThreshold, stepSize);
 
         if (match) {
             if (!bestMatch || match.similarity > bestMatch.similarity) {

@@ -7,6 +7,10 @@ import type { Session } from './src/types';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import { setupLogger } from './src/logger';
+
+// Initialize logger immediately
+setupLogger();
 
 async function switchToNext(): Promise<void> {
     // Sync current session first (auto-detect and save)
