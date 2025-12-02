@@ -6,9 +6,8 @@ export interface Session {
     updated_at: number;
 }
 
-export interface WorkflowStep {
+export interface WorkflowConfig {
     action: 'pressKey' | 'wait' | 'findAndClick' | 'findAndClickAny' | 'openSettings' | 'type' | 'clickAt';
-    stepID?: string;    // Unique ID for this step (used as cache key)
     key?: string;
     modifiers?: string;
     ms?: number;
@@ -31,6 +30,11 @@ export interface WorkflowStep {
     cachedX?: number;  // Cached x coordinate from last successful match
     cachedY?: number;  // Cached y coordinate from last successful match
 }
+
+export type WorkflowStep = WorkflowConfig & {
+    stepID?: string;    // Unique ID for this step (used as cache key)
+    variants?: WorkflowConfig[]; // Multiple variants for the same step (e.g. different languages)
+};
 
 export interface Config {
     workflow: {

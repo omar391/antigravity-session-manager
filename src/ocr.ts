@@ -72,9 +72,7 @@ async function execCommand(cmd: string, args: string[]): Promise<string> {
 }
 
 /**
- * Capture screenshot of the entire screen
- * @param outputPath Optional path to save screenshot (default: temp file)
- * @returns Path to the captured screenshot
+ * Capture screenshot using screencapture (macOS)
  */
 export async function captureScreen(outputPath?: string): Promise<string> {
     const screenshotPath = outputPath || path.join(TEMP_DIR, `screenshot-${Date.now()}.png`);
@@ -91,6 +89,34 @@ export async function captureScreen(outputPath?: string): Promise<string> {
         return screenshotPath;
     } catch (error) {
         throw new Error(`Failed to capture screenshot: ${error}`);
+    }
+}
+
+/**
+ * Run OCR on a base64-encoded image template
+ * Returns all detected text as a single concatenated string
+ */
+export async function detectTextFromTemplate(templateDataUrl: string): Promise<string> {
+    // Save template to temp file
+    const tempPath = path.join(TEMP_DIR, `template-ocr-${Date.now()}.png`);
+
+    try {
+        // Load and save the base64 image
+        const image = await loadBase64Image(templateDataUrl);
+        await image.write(tempPath);
+
+        // Run OCR
+        const results = await detectText(tempPath);
+
+        // Concatenate all detected text
+        const fullText = results.map(r => r.text).join(' ');
+
+        return fullText;
+    } finally {
+        // Cleanup temp file
+        if (fs.existsSync(tempPath)) {
+            fs.unlinkSync(tempPath);
+        }
     }
 }
 
@@ -221,7 +247,7 @@ function parseHexColor(hex: string): { r: number, g: number, b: number, toleranc
  * @param imageTemplate base64 encoded template image
  * @param similarity Similarity threshold (0-1), default 0.85
  * @param multiScale Whether to try multiple scales
- * @returns Element position or null
+ * @returns Element position with actual matched similarity, or null
  */
 export async function findElementByImage(
     screenshotPath: string,
@@ -229,7 +255,7 @@ export async function findElementByImage(
     similarity: number,
     multiScale: boolean,
     config: Config
-): Promise<{ x: number; y: number } | null> {
+): Promise<{ x: number; y: number; similarity: number } | null> {
     try {
         // Load template
         const template = await loadBase64Image(imageTemplate);
@@ -244,7 +270,7 @@ export async function findElementByImage(
 
         if (match) {
             console.log(`🖼️  Image match found at (${match.x}, ${match.y}) [similarity: ${match.similarity.toFixed(2)}]`);
-            return { x: match.x, y: match.y };
+            return { x: match.x, y: match.y, similarity: match.similarity };
         }
 
         return null;

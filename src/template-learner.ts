@@ -55,7 +55,7 @@ export async function captureTemplateForStep(stepID: string): Promise<string | n
 /**
  * Update the workflow.json file with the new template
  */
-export function saveTemplateToWorkflow(stepID: string, dataUrl: string, workflowPath: string) {
+export function saveTemplateToWorkflow(stepID: string, dataUrl: string, workflowPath: string, variantIndex?: number) {
     try {
         const content = fs.readFileSync(workflowPath, 'utf-8');
         const json = JSON.parse(content);
@@ -66,10 +66,22 @@ export function saveTemplateToWorkflow(stepID: string, dataUrl: string, workflow
         if (json.workflow && Array.isArray(json.workflow.steps)) {
             for (const step of json.workflow.steps) {
                 if (step.stepID === stepID) {
-                    step.imageTemplate = dataUrl;
-                    // Set default similarity if not present
-                    if (!step.imageSimilarity) {
-                        step.imageSimilarity = 0.85; // Default threshold
+                    // If variantIndex is provided, save to that specific variant
+                    if (variantIndex !== undefined && step.variants && Array.isArray(step.variants) && step.variants[variantIndex]) {
+                        step.variants[variantIndex].imageTemplate = dataUrl;
+                        // Set default similarity if not present
+                        if (!step.variants[variantIndex].imageSimilarity) {
+                            step.variants[variantIndex].imageSimilarity = 0.85;
+                        }
+                        console.log(`💾 Saved new template to workflow.json for step "${stepID}" variant [${variantIndex}]`);
+                    } else {
+                        // Save to parent step (original behavior)
+                        step.imageTemplate = dataUrl;
+                        // Set default similarity if not present
+                        if (!step.imageSimilarity) {
+                            step.imageSimilarity = 0.85; // Default threshold
+                        }
+                        console.log(`💾 Saved new template to workflow.json for step "${stepID}"`);
                     }
                     updated = true;
                     break;
@@ -79,7 +91,6 @@ export function saveTemplateToWorkflow(stepID: string, dataUrl: string, workflow
 
         if (updated) {
             fs.writeFileSync(workflowPath, JSON.stringify(json, null, 4));
-            console.log(`💾 Saved new template to workflow.json for step "${stepID}"`);
             return true;
         } else {
             console.error(`❌ Could not find step with ID "${stepID}" in workflow.json`);
@@ -99,7 +110,8 @@ export function updateStepAfterMatch(
     matchedSimilarity: number,
     x: number,
     y: number,
-    workflowPath: string
+    workflowPath: string,
+    configIndex?: number
 ): boolean {
     try {
         const content = fs.readFileSync(workflowPath, 'utf-8');
@@ -110,13 +122,20 @@ export function updateStepAfterMatch(
         if (json.workflow && Array.isArray(json.workflow.steps)) {
             for (const step of json.workflow.steps) {
                 if (step.stepID === stepID) {
+                    let targetStep = step;
+
+                    // If configIndex is provided, target the specific variant entry
+                    if (configIndex !== undefined && step.variants && Array.isArray(step.variants) && step.variants[configIndex]) {
+                        targetStep = step.variants[configIndex];
+                    }
+
                     // Only update similarity if step has an image template
-                    if (step.imageTemplate || step.imageTemplates) {
-                        step.imageSimilarity = matchedSimilarity;
+                    if (targetStep.imageTemplate || targetStep.imageTemplates) {
+                        targetStep.imageSimilarity = matchedSimilarity;
                     }
                     // Always save cached coordinates
-                    step.cachedX = x;
-                    step.cachedY = y;
+                    targetStep.cachedX = x;
+                    targetStep.cachedY = y;
                     updated = true;
                     break;
                 }
@@ -125,7 +144,7 @@ export function updateStepAfterMatch(
 
         if (updated) {
             fs.writeFileSync(workflowPath, JSON.stringify(json, null, 4));
-            console.log(`💾 Updated step \"${stepID}\" with similarity=${matchedSimilarity.toFixed(2)}, x=${x}, y=${y}`);
+            console.log(`💾 Updated step \"${stepID}\"${configIndex !== undefined ? `[${configIndex}]` : ''} with similarity=${matchedSimilarity.toFixed(2)}, x=${x}, y=${y}`);
             return true;
         }
         return false;

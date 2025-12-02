@@ -1,10 +1,10 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { keyboard } from "@nut-tree-fork/nut-js";
-import { findElementWithRetry } from './ocr';
+import { findElementWithRetry, captureScreen, findElement, findElementByImage } from './ocr';
 import { clickAt, pressKey, openSettings, wait } from './automation';
 import { captureTemplateForStep, saveTemplateToWorkflow, updateStepAfterMatch } from './template-learner';
-import type { Config, WorkflowStep } from './types';
+import type { Config, WorkflowStep, WorkflowConfig } from './types';
 import { getEffectiveConfig } from './constants';
 
 const CONFIG_FILE = path.join(process.cwd(), 'workflow.json');
@@ -30,6 +30,13 @@ export async function executeWorkflow(
 
     for (const step of config.workflow.steps) {
         try {
+            // Check for multi-variant step
+            if (step.variants && step.variants.length > 0) {
+                const success = await executeMultiConfigStep(step, config, targetEmail, useCache, learnMode);
+                if (!success) return false;
+                continue;
+            }
+
             switch (step.action) {
                 case 'openSettings':
                     if (step.description) {
@@ -144,40 +151,27 @@ export async function executeWorkflow(
                     if (!position) {
                         // LEARNING MODE HOOK
                         if (learnMode && step.stepID) {
-                            const template = await captureTemplateForStep(step.stepID);
-                            if (template) {
-                                // Save to file
-                                const workflowPath = path.join(process.cwd(), 'workflow.json');
-                                saveTemplateToWorkflow(step.stepID, template, workflowPath);
-
-                                // Update local step and retry
-                                step.imageTemplate = template;
-                                step.imageSimilarity = config.ocr.defaultThreshold;
-                                step.multiScale = true; // Enable multi-scale for better matching
-
-                                console.log(`🔄 Retrying step "${step.stepID}" with new template...`);
-                                const retryMaxWait = config.ocr.learningModeRetryTimeout;
-                                const retryPos = await findElementWithRetry(
+                            const retryPos = await handleLearningModeRetry(step.stepID, config, async (template) => {
+                                return await findElementWithRetry(
                                     cacheKey,
                                     searchText,
-                                    false, // Don't use cache for retry
+                                    false,
                                     step.region,
-                                    retryMaxWait, // Give plenty of time for retry with new template
+                                    config.ocr.learningModeRetryTimeout,
                                     retryIntervalTime,
                                     step.colorFilter,
-                                    step.imageTemplate,
-                                    step.imageSimilarity,
-                                    step.multiScale
+                                    template,
+                                    config.ocr.defaultThreshold,
+                                    true
                                 );
+                            });
 
-                                if (retryPos) {
-                                    await clickAt(retryPos.x, retryPos.y);
-                                    break;
-                                } else {
-                                    // Failed retry - show correct timeout
-                                    console.error(`❌ Could not find element: "${searchText}" after retry (timeout: ${retryMaxWait}ms)`);
-                                    return false;
-                                }
+                            if (retryPos) {
+                                await clickAt(retryPos.x, retryPos.y);
+                                break;
+                            } else {
+                                console.error(`❌ Could not find element: "${searchText}" after retry (timeout: ${config.ocr.learningModeRetryTimeout}ms)`);
+                                return false;
                             }
                         }
 
@@ -187,13 +181,9 @@ export async function executeWorkflow(
                     }
 
 
-                    // Save matched coordinates to workflow.json if we have stepID
-                    if (step.stepID) {
-                        const workflowPath = path.join(process.cwd(), 'workflow.json');
-                        // Use the step's imageSimilarity if available, otherwise use default
-                        const matchedSimilarity = step.imageSimilarity || config.ocr.defaultThreshold;
-                        updateStepAfterMatch(step.stepID, matchedSimilarity, position.x, position.y, workflowPath);
-                    }
+                    // Save matched coordinates to workflow.json
+                    const matchedSimilarity = step.imageSimilarity || config.ocr.defaultThreshold;
+                    updateCacheIfEnabled(step.stepID, matchedSimilarity, position.x, position.y, step.useCache);
 
 
                     await clickAt(position.x, position.y);
@@ -237,36 +227,24 @@ export async function executeWorkflow(
                     if (!found) {
                         // LEARNING MODE HOOK
                         if (learnMode && step.stepID) {
-                            const template = await captureTemplateForStep(step.stepID);
-                            if (template) {
-                                // Save to file
-                                const workflowPath = path.join(process.cwd(), 'workflow.json');
-                                saveTemplateToWorkflow(step.stepID, template, workflowPath);
-
-                                // Update local step and retry
-                                step.imageTemplate = template;
-                                step.imageSimilarity = config.ocr.defaultThreshold; // Default
-                                step.multiScale = true; // Enable multi-scale for better matching
-
-                                console.log(`🔄 Retrying step "${step.stepID}" with new template...`);
-                                // Retry with the new template
-                                const retryPos = await findElementWithRetry(
-                                    step.stepID,
-                                    textOptions[0], // Just use first text option for log name
+                            const retryPos = await handleLearningModeRetry(step.stepID, config, async (template) => {
+                                return await findElementWithRetry(
+                                    step.stepID!,
+                                    textOptions[0],
                                     false,
                                     step.region,
-                                    config.ocr.learningModeRetryTimeout, // Use config timeout
+                                    config.ocr.learningModeRetryTimeout,
                                     step.retryInterval || config.workflow.retryInterval,
                                     step.colorFilter,
-                                    step.imageTemplate,
-                                    step.imageSimilarity,
-                                    step.multiScale
+                                    template,
+                                    config.ocr.defaultThreshold,
+                                    true
                                 );
+                            });
 
-                                if (retryPos) {
-                                    await clickAt(retryPos.x, retryPos.y);
-                                    found = true;
-                                }
+                            if (retryPos) {
+                                await clickAt(retryPos.x, retryPos.y);
+                                found = true;
                             }
                         }
 
@@ -288,4 +266,277 @@ export async function executeWorkflow(
     }
 
     return true;
+}
+
+/**
+ * Update cache coordinates if stepID exists and cache is enabled
+ */
+function updateCacheIfEnabled(
+    stepID: string | undefined,
+    similarity: number,
+    x: number,
+    y: number,
+    useCache?: boolean,
+    configIndex?: number
+): void {
+    if (stepID && useCache !== false) {
+        const workflowPath = path.join(process.cwd(), 'workflow.json');
+        updateStepAfterMatch(stepID, similarity, x, y, workflowPath, configIndex);
+    }
+}
+
+/**
+ * Handle learning mode: capture template, save, and retry detection
+ */
+async function handleLearningModeRetry(
+    stepID: string,
+    config: Config,
+    retryFn: (template: string) => Promise<{ x: number; y: number } | null>,
+    skipSave?: boolean
+): Promise<{ x: number; y: number } | null> {
+    const template = await captureTemplateForStep(stepID);
+    if (!template) return null;
+
+    // Save to file unless caller handles it explicitly
+    if (!skipSave) {
+        const workflowPath = path.join(process.cwd(), 'workflow.json');
+        saveTemplateToWorkflow(stepID, template, workflowPath);
+    }
+
+    console.log(`🔄 Retrying step "${stepID}" with new template...`);
+
+    // Call the retry function with the captured template
+    return await retryFn(template);
+}
+
+/**
+ * Try to detect variants in parallel and return first match
+ */
+async function detectVariants(
+    variants: WorkflowConfig[],
+    screenshotPath: string,
+    config: Config,
+    targetEmail: string,
+    extraTemplate?: string
+): Promise<{ result: { x: number; y: number }, index: number, subStep: WorkflowConfig, matchedSimilarity: number } | null> {
+    const promises = variants.map(async (subStep, index) => {
+        let searchText = subStep.text;
+        if (subStep.dynamic && searchText && searchText.includes('{targetEmail}')) {
+            searchText = targetEmail;
+        }
+
+        // Try extra template first (newly captured in learning mode)
+        if (extraTemplate) {
+            const result = await findElementByImage(
+                screenshotPath,
+                extraTemplate,
+                config.ocr.defaultThreshold,
+                true, // Enable multi-scale
+                config
+            );
+            if (result) return { result: { x: result.x, y: result.y }, index, subStep, matchedSimilarity: result.similarity };
+        }
+
+        // Try variant's own image templates
+        if (subStep.imageTemplate || subStep.imageTemplates) {
+            const templates = subStep.imageTemplates || [subStep.imageTemplate!];
+            for (const template of templates) {
+                const result = await findElementByImage(
+                    screenshotPath,
+                    template,
+                    subStep.imageSimilarity || config.ocr.defaultThreshold,
+                    subStep.multiScale || false,
+                    config
+                );
+                if (result) return { result: { x: result.x, y: result.y }, index, subStep, matchedSimilarity: result.similarity };
+            }
+        } else if (searchText) {
+            // Try OCR detection
+            const result = await findElement(
+                searchText,
+                0.8, // Default confidence
+                subStep.region,
+                subStep.colorFilter,
+                screenshotPath
+            );
+            if (result) return { result, index, subStep, matchedSimilarity: 1.0 }; // OCR doesn't return similarity, use 1.0
+        }
+        return null;
+    });
+
+    const results = await Promise.all(promises);
+    return results.find(r => r !== null) || null;
+}
+
+async function executeMultiConfigStep(
+    step: WorkflowStep,
+    config: Config,
+    targetEmail: string,
+    useCache: boolean,
+    learnMode: boolean
+): Promise<boolean> {
+    if (!step.variants || step.variants.length === 0) return false;
+
+    console.log(`🔀 Executing multi-variant step "${step.stepID || step.description}" with ${step.variants.length} variants...`);
+
+    const maxWaitTime = step.maxWait || config.workflow.maxWait;
+    const retryIntervalTime = step.retryInterval || config.workflow.retryInterval;
+    const startTime = Date.now();
+
+    while (Date.now() - startTime < maxWaitTime) {
+        // 1. Check if any variant has cached coordinates
+        for (let i = 0; i < step.variants.length; i++) {
+            const variant = step.variants[i];
+            if (variant.cachedX !== undefined && variant.cachedY !== undefined && useCache) {
+                console.log(`💾 Using cached position from variant #${i}: (${variant.cachedX}, ${variant.cachedY})`);
+
+                // Update cache with current values (refreshes timestamp)
+                updateCacheIfEnabled(
+                    step.stepID,
+                    variant.imageSimilarity || config.ocr.defaultThreshold,
+                    variant.cachedX,
+                    variant.cachedY,
+                    variant.useCache,
+                    i
+                );
+
+                // Click at cached position
+                await clickAt(variant.cachedX, variant.cachedY);
+                return true;
+            }
+        }
+
+        // 2. Capture screen ONCE for all variants
+        const screenshotPath = await captureScreen();
+
+        try {
+            // 3. Run all variants in parallel
+            const match = await detectVariants(step.variants, screenshotPath, config, targetEmail);
+
+            if (match) {
+                const { result, index, subStep } = match;
+                console.log(`✅ Matched variant #${index} (${subStep.text || 'Image'})`);
+
+                // Update cache/template if needed
+                updateCacheIfEnabled(
+                    step.stepID,
+                    match.matchedSimilarity,
+                    result.x,
+                    result.y,
+                    subStep.useCache,
+                    index
+                );
+
+                // Perform action
+                await clickAt(result.x, result.y);
+                return true;
+            }
+
+        } finally {
+            // Cleanup screenshot
+            if (fs.existsSync(screenshotPath)) {
+                fs.unlinkSync(screenshotPath);
+            }
+        }
+
+        // Wait before retry
+        await wait(retryIntervalTime);
+    }
+
+    // LEARNING MODE HOOK - after initial timeout
+    if (learnMode && step.stepID && step.variants) {
+        const result = await handleLearningModeRetry(step.stepID, config, async (template) => {
+            // AUTO-DETECT which variant was captured using OCR
+            let detectedVariantIndex: number | null = null;
+
+            try {
+                const { detectTextFromTemplate } = await import('./ocr');
+                const ocrText = await detectTextFromTemplate(template);
+
+                console.log(`🔍 Auto-detecting variant from captured template...`);
+
+                // Find matching variants
+                const matches = step.variants!
+                    .map((v, idx) => ({ idx, text: v.text }))
+                    .filter(({ text }) => text && ocrText.includes(text));
+
+                if (matches.length === 1) {
+                    detectedVariantIndex = matches[0].idx;
+                    console.log(`✅ Auto-detected variant #${detectedVariantIndex}: "${matches[0].text}"`);
+                } else if (matches.length === 0) {
+                    console.log(`⚠️  Could not auto-detect variant (no text matched in OCR)`);
+                    console.log(`   OCR detected: "${ocrText.substring(0, 100)}..."`);
+                } else {
+                    console.log(`⚠️  Multiple variants matched: ${matches.map(m => `#${m.idx}`).join(', ')}`);
+                }
+            } catch (error) {
+                console.log(`⚠️  OCR auto-detection failed: ${error}`);
+            }
+
+            // Fall back to last variant if auto-detection failed
+            const targetVariantIndex = detectedVariantIndex !== null
+                ? detectedVariantIndex
+                : step.variants!.length - 1;
+
+            if (detectedVariantIndex === null) {
+                console.log(`⚠️  Saving to last variant #${targetVariantIndex} as fallback`);
+            }
+
+            // Save to the detected (or fallback) variant
+            const workflowPath = path.join(process.cwd(), 'workflow.json');
+            saveTemplateToWorkflow(step.stepID!, template, workflowPath, targetVariantIndex);
+
+            // Retry loop for multi-variant with new template
+            const retryStartTime = Date.now();
+            const retryMaxWait = config.ocr.learningModeRetryTimeout;
+
+            while (Date.now() - retryStartTime < retryMaxWait) {
+                const screenshotPath = await captureScreen();
+
+                try {
+                    const match = await detectVariants(step.variants!, screenshotPath, config, targetEmail, template);
+
+                    if (match) {
+                        console.log(`✅ Matched variant #${match.index} after learning retry`);
+
+                        // Update cache with the ACTUAL matched similarity
+                        updateCacheIfEnabled(
+                            step.stepID,
+                            match.matchedSimilarity,
+                            match.result.x,
+                            match.result.y,
+                            match.subStep.useCache,
+                            match.index
+                        );
+
+                        return match.result;
+                    }
+                } finally {
+                    if (fs.existsSync(screenshotPath)) {
+                        fs.unlinkSync(screenshotPath);
+                    }
+                }
+
+                await wait(retryIntervalTime);
+            }
+
+            return null; // Timeout
+        }, true); // skipSave=true since we handle it explicitly above
+
+        if (result) {
+            await clickAt(result.x, result.y);
+            return true;
+        } else {
+            console.error(`❌ Could not find any variant for step "${step.stepID}" after learning retry (timeout: ${config.ocr.learningModeRetryTimeout}ms)`);
+            return false;
+        }
+    }
+
+    if (step.optional) {
+        console.log(`⚠️  Optional multi-variant step skipped`);
+        return true;
+    }
+
+    console.error(`❌ Could not find any variant for step "${step.stepID}"`);
+    return false;
 }
