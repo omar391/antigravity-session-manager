@@ -137,7 +137,7 @@ describe("OCR Logic", () => {
             mockFs.readFileSync.mockImplementation(createMockReadFileSync({}));
 
             // Image match succeeds
-            mockFindTemplateInImage.mockResolvedValue({ x: 300, y: 300, similarity: 0.9 });
+            mockFindTemplateInImage.mockResolvedValue({ x: 300, y: 300, similarity: 0.9, bounds: { width: 50, height: 50 } });
 
             // OCR also succeeds (default mock)
 
@@ -169,7 +169,7 @@ describe("OCR Logic", () => {
             mockFindTemplateInImage.mockImplementation(async (path: any, tmpl: any, sim: any) => {
                 callCount++;
                 if (sim < 0.95) {
-                    return { x: 500, y: 500, similarity: sim };
+                    return { x: 500, y: 500, similarity: sim, bounds: { width: 40, height: 40 } };
                 }
                 return null;
             });

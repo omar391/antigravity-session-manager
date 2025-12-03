@@ -4,6 +4,7 @@ export interface TemplateMatch {
     x: number;
     y: number;
     similarity: number;
+    bounds: { width: number; height: number };
 }
 
 /**
@@ -88,7 +89,8 @@ export async function findTemplateInImage(
                     bestMatch = {
                         x: x + templateWidth / 2,  // Return center point
                         y: y + templateHeight / 2,
-                        similarity
+                        similarity,
+                        bounds: { width: templateWidth, height: templateHeight }
                     };
 
                     // Early exit if perfect match

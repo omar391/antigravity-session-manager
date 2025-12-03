@@ -100,8 +100,28 @@ export async function executeWorkflow(
                     // Check if we have cached coordinates in the workflow step
                     let position = null;
                     if (step.cachedX !== undefined && step.cachedY !== undefined) {
-                        console.log(`💾 Using cached position from workflow: (${step.cachedX}, ${step.cachedY})`);
-                        position = { x: step.cachedX, y: step.cachedY };
+                        console.log(`💾 Found cached position: (${step.cachedX}, ${step.cachedY})`);
+                        // Verify cache if we have bounds and imageTemplate
+                        if (step.cachedBounds && step.imageTemplate) {
+                            const isValid = await verifyCachedPosition(
+                                step.cachedX,
+                                step.cachedY,
+                                step.cachedBounds,
+                                step.imageTemplate,
+                                step.imageSimilarity || config.ocr.defaultThreshold,
+                                config
+                            );
+
+                            if (isValid) {
+                                position = { x: step.cachedX, y: step.cachedY };
+                            } else {
+                                console.log(`⚠️  Cache verification failed, performing full search`);
+                            }
+                        } else {
+                            // No bounds or template, use cache without verification
+                            console.log(`⚠️  No bounds/template for verification, using cache without verification`);
+                            position = { x: step.cachedX, y: step.cachedY };
+                        }
                     }
 
                     // If no cached position, try to find it
@@ -167,6 +187,34 @@ export async function executeWorkflow(
                             });
 
                             if (retryPos) {
+                                // Save the matched position and bounds to cache
+                                // Prioritize bounds from the match result (may include text bounds from OCR)
+                                let boundsToSave = retryPos.bounds;
+
+                                // If no bounds in result, try to get from imageTemplateBounds
+                                if (!boundsToSave) {
+                                    const workflowPath = path.join(process.cwd(), 'workflow.json');
+                                    const workflowContent = JSON.parse(fs.readFileSync(workflowPath, 'utf-8'));
+
+                                    // Find the step and extract imageTemplateBounds
+                                    for (const workflowStep of workflowContent.workflow.steps) {
+                                        if (workflowStep.stepID === step.stepID && workflowStep.imageTemplateBounds) {
+                                            boundsToSave = workflowStep.imageTemplateBounds;
+                                            break;
+                                        }
+                                    }
+                                }
+
+                                // Update cache with position and bounds
+                                updateCacheIfEnabled(
+                                    step.stepID,
+                                    step.imageSimilarity || config.ocr.defaultThreshold,
+                                    retryPos.x,
+                                    retryPos.y,
+                                    step.useCache,
+                                    boundsToSave
+                                );
+
                                 await clickAt(retryPos.x, retryPos.y);
                                 break;
                             } else {
@@ -180,11 +228,16 @@ export async function executeWorkflow(
                         return false;
                     }
 
-
-                    // Save matched coordinates to workflow.json
+                    // Save matched coordinates and bounds to workflow.json
                     const matchedSimilarity = step.imageSimilarity || config.ocr.defaultThreshold;
-                    updateCacheIfEnabled(step.stepID, matchedSimilarity, position.x, position.y, step.useCache);
-
+                    updateCacheIfEnabled(
+                        step.stepID,
+                        matchedSimilarity,
+                        position.x,
+                        position.y,
+                        step.useCache,
+                        position.bounds  // Bounds from either image or text matching
+                    );
 
                     await clickAt(position.x, position.y);
                     break;
@@ -269,6 +322,73 @@ export async function executeWorkflow(
 }
 
 /**
+ * Verify that a cached position still contains the expected template
+ */
+async function verifyCachedPosition(
+    cachedX: number,
+    cachedY: number,
+    cachedBounds: { width: number; height: number },
+    imageTemplate: string,
+    similarity: number,
+    config: Config
+): Promise<boolean> {
+    try {
+        // Capture screenshot
+        const screenshotPath = await captureScreen();
+
+        try {
+            // Load the template to compare
+            const { loadBase64Image, findTemplateInImage } = await import('./image-matcher');
+            const template = await loadBase64Image(imageTemplate);
+
+            // Calculate search region with 20% padding
+            const padding = 0.2;
+            const searchWidth = Math.round(cachedBounds.width * (1 + padding));
+            const searchHeight = Math.round(cachedBounds.height * (1 + padding));
+
+            // Crop region around cached position
+            const Jimp = (await import('jimp')).Jimp;
+            const screenshot = await Jimp.read(screenshotPath);
+
+            // Calculate crop bounds (center around cached position)
+            const cropX = Math.max(0, cachedX - Math.floor(searchWidth / 2));
+            const cropY = Math.max(0, cachedY - Math.floor(searchHeight / 2));
+            const cropWidth = Math.min(searchWidth, screenshot.width - cropX);
+            const cropHeight = Math.min(searchHeight, screenshot.height - cropY);
+
+            // Crop the region
+            const croppedScreenshot = screenshot.clone().crop({ x: cropX, y: cropY, w: cropWidth, h: cropHeight });
+            const croppedPath = screenshotPath.replace('.png', '-cropped.png') as `${string}.${string}`;
+            await croppedScreenshot.write(croppedPath);
+
+            // Try to match template in cropped region
+            const match = await findTemplateInImage(croppedPath, template, similarity, config.ocr.stepSize);
+
+            // Cleanup
+            if (fs.existsSync(croppedPath)) {
+                fs.unlinkSync(croppedPath);
+            }
+
+            if (match) {
+                console.log(`✅ Cache verified: template found near cached position`);
+                return true;
+            } else {
+                console.log(`⚠️  Cache verification failed: template not found at cached position`);
+                return false;
+            }
+        } finally {
+            // Cleanup screenshot
+            if (fs.existsSync(screenshotPath)) {
+                fs.unlinkSync(screenshotPath);
+            }
+        }
+    } catch (error) {
+        console.warn(`⚠️  Cache verification error: ${error}`);
+        return false;
+    }
+}
+
+/**
  * Update cache coordinates if stepID exists and cache is enabled
  */
 function updateCacheIfEnabled(
@@ -277,11 +397,12 @@ function updateCacheIfEnabled(
     x: number,
     y: number,
     useCache?: boolean,
+    bounds?: { width: number; height: number },
     configIndex?: number
 ): void {
     if (stepID && useCache !== false) {
         const workflowPath = path.join(process.cwd(), 'workflow.json');
-        updateStepAfterMatch(stepID, similarity, x, y, workflowPath, configIndex);
+        updateStepAfterMatch(stepID, similarity, x, y, workflowPath, bounds, configIndex);
     }
 }
 
@@ -291,22 +412,24 @@ function updateCacheIfEnabled(
 async function handleLearningModeRetry(
     stepID: string,
     config: Config,
-    retryFn: (template: string) => Promise<{ x: number; y: number } | null>,
+    retryFn: (template: string) => Promise<{ x: number; y: number; bounds?: { width: number; height: number } } | null>,
     skipSave?: boolean
-): Promise<{ x: number; y: number } | null> {
-    const template = await captureTemplateForStep(stepID);
-    if (!template) return null;
+): Promise<{ x: number; y: number; bounds?: { width: number; height: number } } | null> {
+    const captureResult = await captureTemplateForStep(stepID);
+    if (!captureResult) return null;
+
+    const { dataUrl, bounds } = captureResult;
 
     // Save to file unless caller handles it explicitly
     if (!skipSave) {
         const workflowPath = path.join(process.cwd(), 'workflow.json');
-        saveTemplateToWorkflow(stepID, template, workflowPath);
+        saveTemplateToWorkflow(stepID, dataUrl, bounds, workflowPath);
     }
 
     console.log(`🔄 Retrying step "${stepID}" with new template...`);
 
     // Call the retry function with the captured template
-    return await retryFn(template);
+    return await retryFn(dataUrl);
 }
 
 /**
@@ -318,7 +441,7 @@ async function detectVariants(
     config: Config,
     targetEmail: string,
     extraTemplate?: string
-): Promise<{ result: { x: number; y: number }, index: number, subStep: WorkflowConfig, matchedSimilarity: number } | null> {
+): Promise<{ result: { x: number; y: number }, index: number, subStep: WorkflowConfig, matchedSimilarity: number, bounds?: { width: number; height: number } } | null> {
     const promises = variants.map(async (subStep, index) => {
         let searchText = subStep.text;
         if (subStep.dynamic && searchText && searchText.includes('{targetEmail}')) {
@@ -334,7 +457,7 @@ async function detectVariants(
                 true, // Enable multi-scale
                 config
             );
-            if (result) return { result: { x: result.x, y: result.y }, index, subStep, matchedSimilarity: result.similarity };
+            if (result) return { result: { x: result.x, y: result.y }, index, subStep, matchedSimilarity: result.similarity, bounds: result.bounds };
         }
 
         // Try variant's own image templates
@@ -348,7 +471,7 @@ async function detectVariants(
                     subStep.multiScale || false,
                     config
                 );
-                if (result) return { result: { x: result.x, y: result.y }, index, subStep, matchedSimilarity: result.similarity };
+                if (result) return { result: { x: result.x, y: result.y }, index, subStep, matchedSimilarity: result.similarity, bounds: result.bounds };
             }
         } else if (searchText) {
             // Try OCR detection
@@ -388,21 +511,41 @@ async function executeMultiConfigStep(
         for (let i = 0; i < step.variants.length; i++) {
             const variant = step.variants[i];
             if (variant.cachedX !== undefined && variant.cachedY !== undefined && useCache) {
-                console.log(`💾 Using cached position from variant #${i}: (${variant.cachedX}, ${variant.cachedY})`);
+                console.log(`💾 Found cached position from variant #${i}: (${variant.cachedX}, ${variant.cachedY})`);
 
-                // Update cache with current values (refreshes timestamp)
-                updateCacheIfEnabled(
-                    step.stepID,
-                    variant.imageSimilarity || config.ocr.defaultThreshold,
-                    variant.cachedX,
-                    variant.cachedY,
-                    variant.useCache,
-                    i
-                );
+                // Verify cache if we have bounds and imageTemplate
+                let useCache = true;
+                if (variant.cachedBounds && variant.imageTemplate) {
+                    useCache = await verifyCachedPosition(
+                        variant.cachedX,
+                        variant.cachedY,
+                        variant.cachedBounds,
+                        variant.imageTemplate,
+                        variant.imageSimilarity || config.ocr.defaultThreshold,
+                        config
+                    );
+                } else {
+                    console.log(`⚠️  No bounds/template for verification, using cache without verification`);
+                }
 
-                // Click at cached position
-                await clickAt(variant.cachedX, variant.cachedY);
-                return true;
+                if (useCache) {
+                    // Update cache with current values (refreshes timestamp)
+                    updateCacheIfEnabled(
+                        step.stepID,
+                        variant.imageSimilarity || config.ocr.defaultThreshold,
+                        variant.cachedX,
+                        variant.cachedY,
+                        variant.useCache,
+                        variant.cachedBounds,
+                        i
+                    );
+
+                    // Click at cached position
+                    await clickAt(variant.cachedX, variant.cachedY);
+                    return true;
+                } else {
+                    console.log(`⚠️  Cache verification failed for variant #${i}, trying other variants`);
+                }
             }
         }
 
@@ -424,6 +567,7 @@ async function executeMultiConfigStep(
                     result.x,
                     result.y,
                     subStep.useCache,
+                    match.bounds,
                     index
                 );
 
@@ -482,9 +626,21 @@ async function executeMultiConfigStep(
                 console.log(`⚠️  Saving to last variant #${targetVariantIndex} as fallback`);
             }
 
+            // Extract bounds from the captured template
+            let templateBounds: { width: number; height: number } | undefined;
+            try {
+                const { loadBase64Image } = await import('./image-matcher');
+                const templateImg = await loadBase64Image(template);
+                templateBounds = { width: templateImg.width, height: templateImg.height };
+            } catch (e) {
+                console.warn('⚠️  Could not extract template bounds');
+            }
+
             // Save to the detected (or fallback) variant
             const workflowPath = path.join(process.cwd(), 'workflow.json');
-            saveTemplateToWorkflow(step.stepID!, template, workflowPath, targetVariantIndex);
+            if (templateBounds) {
+                saveTemplateToWorkflow(step.stepID!, template, templateBounds, workflowPath, targetVariantIndex);
+            }
 
             // Retry loop for multi-variant with new template
             const retryStartTime = Date.now();
@@ -506,6 +662,7 @@ async function executeMultiConfigStep(
                             match.result.x,
                             match.result.y,
                             match.subStep.useCache,
+                            match.bounds,
                             match.index
                         );
 

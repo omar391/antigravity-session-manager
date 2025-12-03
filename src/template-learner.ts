@@ -8,9 +8,9 @@ import { spawnSync } from 'child_process';
 /**
  * Interactively capture a template for a specific step
  * @param stepID The ID of the step being learned
- * @returns Base64 encoded image string or null if cancelled
+ * @returns Object with dataUrl and bounds, or null if cancelled
  */
-export async function captureTemplateForStep(stepID: string): Promise<string | null> {
+export async function captureTemplateForStep(stepID: string): Promise<{ dataUrl: string; bounds: { width: number; height: number } } | null> {
     console.log(`\n📸 LEARNING MODE: Step "${stepID}" failed.`);
     console.log('------------------------------------------------');
     console.log('Launching screen capture tool...');
@@ -44,8 +44,11 @@ export async function captureTemplateForStep(stepID: string): Promise<string | n
         // Cleanup
         fs.unlinkSync(tempPath);
 
-        console.log(`✅ Captured template for "${stepID}"`);
-        return dataUrl;
+        console.log(`✅ Captured template for "${stepID}" (${jimpImg.width}x${jimpImg.height})`);
+        return {
+            dataUrl,
+            bounds: { width: jimpImg.width, height: jimpImg.height }
+        };
     } catch (error) {
         console.error('❌ Failed to process captured image:', error);
         return null;
@@ -55,7 +58,13 @@ export async function captureTemplateForStep(stepID: string): Promise<string | n
 /**
  * Update the workflow.json file with the new template
  */
-export function saveTemplateToWorkflow(stepID: string, dataUrl: string, workflowPath: string, variantIndex?: number) {
+export function saveTemplateToWorkflow(
+    stepID: string,
+    dataUrl: string,
+    bounds: { width: number; height: number },
+    workflowPath: string,
+    variantIndex?: number
+) {
     try {
         const content = fs.readFileSync(workflowPath, 'utf-8');
         const json = JSON.parse(content);
@@ -69,6 +78,7 @@ export function saveTemplateToWorkflow(stepID: string, dataUrl: string, workflow
                     // If variantIndex is provided, save to that specific variant
                     if (variantIndex !== undefined && step.variants && Array.isArray(step.variants) && step.variants[variantIndex]) {
                         step.variants[variantIndex].imageTemplate = dataUrl;
+                        step.variants[variantIndex].imageTemplateBounds = bounds;
                         // Set default similarity if not present
                         if (!step.variants[variantIndex].imageSimilarity) {
                             step.variants[variantIndex].imageSimilarity = 0.85;
@@ -77,6 +87,7 @@ export function saveTemplateToWorkflow(stepID: string, dataUrl: string, workflow
                     } else {
                         // Save to parent step (original behavior)
                         step.imageTemplate = dataUrl;
+                        step.imageTemplateBounds = bounds;
                         // Set default similarity if not present
                         if (!step.imageSimilarity) {
                             step.imageSimilarity = 0.85; // Default threshold
@@ -111,6 +122,7 @@ export function updateStepAfterMatch(
     x: number,
     y: number,
     workflowPath: string,
+    bounds?: { width: number; height: number },
     configIndex?: number
 ): boolean {
     try {
@@ -136,6 +148,10 @@ export function updateStepAfterMatch(
                     // Always save cached coordinates
                     targetStep.cachedX = x;
                     targetStep.cachedY = y;
+                    // Save cached bounds if provided
+                    if (bounds) {
+                        targetStep.cachedBounds = bounds;
+                    }
                     updated = true;
                     break;
                 }

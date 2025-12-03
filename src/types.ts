@@ -29,6 +29,8 @@ export interface WorkflowConfig {
     y?: number;
     cachedX?: number;  // Cached x coordinate from last successful match
     cachedY?: number;  // Cached y coordinate from last successful match
+    imageTemplateBounds?: { width: number; height: number };  // Original captured template size
+    cachedBounds?: { width: number; height: number };  // Matched template size (may be scaled)
 }
 
 export type WorkflowStep = WorkflowConfig & {

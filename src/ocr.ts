@@ -4,7 +4,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { screen, imageToJimp } from "@nut-tree-fork/nut-js";
 import { Jimp } from 'jimp';
-import { loadBase64Image, findTemplateInImage, findTemplateMultiScale } from './image-matcher';
+import { loadBase64Image, findTemplateInImage, findTemplateMultiScale, type TemplateMatch } from './image-matcher';
 import type { Config, ElementPosition } from './types';
 import { getEffectiveConfig } from './constants';
 
@@ -255,12 +255,12 @@ export async function findElementByImage(
     similarity: number,
     multiScale: boolean,
     config: Config
-): Promise<{ x: number; y: number; similarity: number } | null> {
+): Promise<{ x: number; y: number; similarity: number; bounds: { width: number; height: number } } | null> {
     try {
         // Load template
         const template = await loadBase64Image(imageTemplate);
 
-        let match: { x: number; y: number; similarity: number } | null = null;
+        let match: TemplateMatch | null = null;
         // Try multi-scale matching if enabled
         if (multiScale) {
             match = await findTemplateMultiScale(screenshotPath, template, similarity, config.ocr.scales, config.ocr.stepSize);
@@ -270,7 +270,7 @@ export async function findElementByImage(
 
         if (match) {
             console.log(`🖼️  Image match found at (${match.x}, ${match.y}) [similarity: ${match.similarity.toFixed(2)}]`);
-            return { x: match.x, y: match.y, similarity: match.similarity };
+            return { x: match.x, y: match.y, similarity: match.similarity, bounds: match.bounds };
         }
 
         return null;
@@ -633,21 +633,30 @@ export async function findElementWithRetry(
     imageTemplate?: string,
     imageSimilarity?: number,
     multiScale?: boolean
-): Promise<{ x: number; y: number } | null> {
+): Promise<{ x: number; y: number; bounds?: { width: number; height: number } } | null> {
     const startTime = Date.now();
 
     // Note: Cache verification is handled by workflow.ts using cachedX/cachedY fields
     // This function only performs element detection
 
     // Helper for image matching
-    const tryImages = async (screenshotPath: string): Promise<{ x: number; y: number } | null> => {
+    const tryImages = async (screenshotPath: string): Promise<{ x: number; y: number; bounds?: { width: number; height: number } } | null> => {
         if (!imageTemplate) return null;
         return await findElementByImage(screenshotPath, imageTemplate, imageSimilarity || config.ocr.defaultThreshold, multiScale || false, config);
     };
 
     // Helper for OCR
-    const tryOCR = async (screenshotPath: string): Promise<{ x: number; y: number } | null> => {
-        return await findElement(searchText, config.ocr.minConfidence, region, colorFilter, screenshotPath);
+    const tryOCR = async (screenshotPath: string): Promise<{ x: number; y: number; bounds?: { width: number; height: number } } | null> => {
+        const result = await findElement(searchText, config.ocr.minConfidence, region, colorFilter, screenshotPath);
+        if (result) {
+            // Extract bounds from OCR result
+            return {
+                x: result.x,
+                y: result.y,
+                bounds: { width: result.width, height: result.height }
+            };
+        }
+        return null;
     };
 
     // Load config values for dynamic similarity (lazy loaded and cached)
@@ -680,7 +689,7 @@ export async function findElementWithRetry(
 
         // Run all methods in parallel using the SAME screenshot
         try {
-            const promises: Promise<{ x: number; y: number } | null>[] = [];
+            const promises: Promise<{ x: number; y: number; bounds?: { width: number; height: number } } | null>[] = [];
 
             // 1. Image Matching
             if (imageTemplate) {
