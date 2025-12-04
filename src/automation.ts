@@ -1,22 +1,13 @@
 import { spawn } from 'child_process';
 import { keyboard, mouse, Key, Point } from "@nut-tree-fork/nut-js";
 
-export async function clickAt(x: number, y: number, useMouseCoords: boolean = false): Promise<void> {
-    let mouseX: number, mouseY: number;
+export async function clickAt(x: number, y: number): Promise<void> {
+    // Coordinates should already be in logical mouse space (1x)
+    // The detection layer (ocr.ts) normalizes coordinates from screenshot pixels to logical points
+    const mouseX = Math.round(x);
+    const mouseY = Math.round(y);
 
-    if (useMouseCoords) {
-        // Coordinates are already in mouse space (e.g., hardcoded positions)
-        mouseX = x;
-        mouseY = y;
-        console.log(`   🖱️  Clicking at mouse(${mouseX}, ${mouseY})`);
-    } else {
-        // Convert from screenshot coordinates to mouse coordinates
-        // Screenshots are captured at Retina resolution (2x), but mouse uses logical coordinates
-        const scaleFactor = 2; // Retina display scale
-        mouseX = Math.round(x / scaleFactor);
-        mouseY = Math.round(y / scaleFactor);
-        console.log(`   🖱️  Clicking at screenshot(${x}, ${y}) -> mouse(${mouseX}, ${mouseY})`);
-    }
+    console.log(`   🖱️  Clicking at mouse(${mouseX}, ${mouseY})`);
 
     await mouse.setPosition(new Point(mouseX, mouseY));
     await mouse.leftClick();

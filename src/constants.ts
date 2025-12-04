@@ -20,7 +20,6 @@ const DEFAULTS: Config = {
         minSimilarity: 0.7,           // For adaptive search
         decayRate: 0.05,              // For adaptive search
         defaultThreshold: 0.85,       // For static match
-        stepSize: 5,                  // Pixel step
         scales: [0.8, 0.9, 1.0, 1.1, 1.2],
         minConfidence: 0.8,           // For OCR
         learningModeRetryTimeout: 20000,

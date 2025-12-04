@@ -31,6 +31,7 @@ export interface WorkflowConfig {
     cachedY?: number;  // Cached y coordinate from last successful match
     imageTemplateBounds?: { width: number; height: number };  // Original captured template size
     cachedBounds?: { width: number; height: number };  // Matched template size (may be scaled)
+    textBounds?: { width: number; height: number };            // Text bounds within image (from TSV or progressive search)
 }
 
 export type WorkflowStep = WorkflowConfig & {
@@ -51,7 +52,6 @@ export interface Config {
         minSimilarity: number;          // Default 0.7
         decayRate: number;              // Default 0.05
         defaultThreshold: number;       // Default 0.85
-        stepSize: number;               // Default 5
         scales: number[];               // Default [0.8, 0.9, 1.0, 1.1, 1.2]
         minConfidence: number;          // Default 0.8
         learningModeRetryTimeout: number; // Default 20000ms

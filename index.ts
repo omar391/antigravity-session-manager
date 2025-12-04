@@ -3,6 +3,7 @@ import { clearCache } from './src/ocr';
 import { syncCurrent, getCurrentSession, getNextSession, listSessions, initSessionDB, deleteSession } from './src/database';
 import { focusAntigravity, pressKey, wait } from './src/automation';
 import { executeWorkflow } from './src/workflow';
+import { initOpenCV } from './src/image-matcher';
 import type { Session } from './src/types';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -42,6 +43,9 @@ async function switchToNext(): Promise<void> {
 
     // Execute automation workflow
     console.log('🤖 Starting automated workflow...\n');
+
+    // Initialize OpenCV for image matching (must be done at entry point)
+    await initOpenCV();
 
     // Focus Antigravity window first
     console.log('🎯 Focusing Antigravity window...');

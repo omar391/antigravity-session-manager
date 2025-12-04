@@ -24,6 +24,7 @@ export async function executeWorkflow(
 
     const rawConfig = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8'));
     const config = getEffectiveConfig(rawConfig);
+
     // const useCache = config.ocr.cacheEnabled; // This line is commented out as useCache is now a parameter
 
     console.log('');
@@ -68,7 +69,7 @@ export async function executeWorkflow(
                         console.log(`🖱️  ${step.description}...`);
                     }
                     // Hardcoded coordinates are in mouse space, not screenshot space
-                    await clickAt(step.x!, step.y!, true);
+                    await clickAt(step.x!, step.y!);
                     break;
 
                 case 'wait':
@@ -101,24 +102,53 @@ export async function executeWorkflow(
                     let position = null;
                     if (step.cachedX !== undefined && step.cachedY !== undefined) {
                         console.log(`💾 Found cached position: (${step.cachedX}, ${step.cachedY})`);
-                        // Verify cache if we have bounds and imageTemplate
-                        if (step.cachedBounds && step.imageTemplate) {
-                            const isValid = await verifyCachedPosition(
-                                step.cachedX,
-                                step.cachedY,
-                                step.cachedBounds,
-                                step.imageTemplate,
-                                step.imageSimilarity || config.ocr.defaultThreshold,
-                                config
-                            );
 
-                            if (isValid) {
-                                position = { x: step.cachedX, y: step.cachedY };
-                            } else {
+                        // Run image and text verification in parallel to minimize latency
+                        const verificationPromises: Promise<boolean>[] = [];
+
+                        // Verify image template if available
+                        if (step.imageTemplateBounds && step.imageTemplate) {
+                            verificationPromises.push(
+                                verifyCachedPosition(
+                                    step.cachedX,
+                                    step.cachedY,
+                                    step.imageTemplateBounds,
+                                    step.imageTemplate,
+                                    step.imageSimilarity || config.ocr.defaultThreshold,
+                                    config
+                                )
+                            );
+                        }
+
+                        // Verify text if available
+                        if (step.text && step.textBounds) {
+                            verificationPromises.push(
+                                verifyTextAtCachedPosition(
+                                    step.cachedX,
+                                    step.cachedY,
+                                    step.textBounds,
+                                    searchText,
+                                    config
+                                )
+                            );
+                        }
+
+                        // Wait for all verifications to complete
+                        let isValid = true;
+                        if (verificationPromises.length > 0) {
+                            const results = await Promise.all(verificationPromises);
+                            isValid = results.every(r => r); // All must pass
+
+                            if (!isValid) {
                                 console.log(`⚠️  Cache verification failed, performing full search`);
                             }
-                        } else {
-                            // No bounds or template, use cache without verification
+                        }
+
+                        // Use cache only if verification passed
+                        if (isValid) {
+                            position = { x: step.cachedX, y: step.cachedY };
+                        } else if (verificationPromises.length === 0) {
+                            // No verification possible (legacy cache), use anyway
                             console.log(`⚠️  No bounds/template for verification, using cache without verification`);
                             position = { x: step.cachedX, y: step.cachedY };
                         }
@@ -126,11 +156,133 @@ export async function executeWorkflow(
 
                     // If no cached position, try to find it
                     if (!position) {
-                        // Default useCache to true
-                        const shouldUseCache = step.useCache !== false && useCache;
-                        // In learning mode, we still want a timeout so we can trigger the interactive capture
+                        // Declare these first for use in early learning mode trigger
                         const maxWaitTime = step.maxWait || config.workflow.maxWait;
                         const retryIntervalTime = step.retryInterval || config.workflow.retryInterval;
+
+                        // CRITICAL: If no imageTemplate, trigger learning mode immediately
+                        // Text-only OCR is unreliable (accepts low-confidence substring matches)
+                        if (!step.imageTemplate && learnMode && step.stepID) {
+                            console.log(`⚠️  No imageTemplate found - triggering learning mode immediately`);
+                            const retryPos = await handleLearningModeRetry(step.stepID, config, async (template) => {
+                                return await findElementWithRetry(
+                                    cacheKey,
+                                    searchText,
+                                    false,
+                                    step.region,
+                                    config.ocr.learningModeRetryTimeout,
+                                    retryIntervalTime,
+                                    step.colorFilter,
+                                    template,
+                                    config.ocr.defaultThreshold,
+                                    true, // multiScale
+                                    true // isLearning: true
+                                );
+                            }, false);
+
+                            if (retryPos) {
+                                // TEXT BOUNDS FINDING: Now that we have the matched position
+                                let textBounds: { width: number; height: number } | undefined;
+                                if (step.text) {
+                                    // Load the template to try OCR on it first
+                                    const workflowPath = path.join(process.cwd(), 'workflow.json');
+                                    const workflowContent = fs.readFileSync(workflowPath, 'utf-8');
+                                    const workflow = JSON.parse(workflowContent);
+                                    const currentStep = workflow.workflow.steps.find((s: any) => s.stepID === step.stepID);
+
+                                    if (currentStep?.imageTemplate) {
+                                        // For text bounds search, prefer OCR position if available (text might not be centered in image template)
+                                        // Re-run OCR to get exact text position
+                                        const ocrPosition = await findElement(
+                                            step.text,
+                                            config.ocr.minConfidence,
+                                            step.region,
+                                            step.colorFilter
+                                        );
+
+                                        const searchX = ocrPosition?.x ?? retryPos.x;
+                                        const searchY = ocrPosition?.y ?? retryPos.y;
+
+                                        console.log(`🔍 [Text Bounds] Using ${ocrPosition ? 'OCR' : 'image'} position for search: (${searchX}, ${searchY})`);
+
+                                        textBounds = await findTextBoundsWithinImage(
+                                            currentStep.imageTemplate,
+                                            currentStep.imageTemplateBounds || retryPos.bounds,
+                                            step.text,
+                                            config,
+                                            searchX,
+                                            searchY
+                                        ) || undefined;
+
+                                        if (textBounds) {
+                                            // Save text bounds
+                                            const workflowPath = path.join(process.cwd(), 'workflow.json');
+                                            saveTemplateToWorkflow(
+                                                step.stepID,
+                                                currentStep.imageTemplate,
+                                                currentStep.imageTemplateBounds,
+                                                workflowPath,
+                                                undefined,
+                                                textBounds
+                                            );
+                                        }
+                                    }
+                                }
+
+                                // Save the matched position and bounds to cache
+                                // Use image bounds if available (from image match), otherwise fall back to result bounds
+                                let boundsToSave = retryPos.imageBounds || retryPos.bounds;
+
+                                // If no bounds in result, try to get from imageTemplateBounds
+                                if (!boundsToSave) {
+                                    const workflowPath = path.join(process.cwd(), 'workflow.json');
+                                    const workflowContent = fs.readFileSync(workflowPath, 'utf-8');
+                                    const workflow = JSON.parse(workflowContent);
+
+                                    const currentStep = workflow.workflow.steps.find((s: any) => s.stepID === step.stepID);
+                                    if (currentStep?.imageTemplateBounds) {
+                                        boundsToSave = currentStep.imageTemplateBounds;
+                                    }
+                                }
+
+                                updateCacheIfEnabled(
+                                    step.stepID,
+                                    retryPos.similarity ?? 1.0,
+                                    retryPos.x,
+                                    retryPos.y,
+                                    step.useCache,
+                                    boundsToSave,
+                                    undefined,
+                                    undefined,
+                                    retryPos.imageBounds ? retryPos.similarity : undefined // Only pass similarity if from image search
+                                );
+
+                                await clickAt(retryPos.x, retryPos.y);
+                                break; // Continue to next step instead of exiting workflow
+                            } else {
+                                // Learning was cancelled or failed
+                                if (step.optional) {
+                                    console.log(`⚠️  Optional step skipped: ${step.description || searchText}`);
+                                    break; // Continue to next step
+                                }
+                                console.error(`❌ Learning mode cancelled or failed for: ${searchText}`);
+                                return false;
+                            }
+                        }
+
+                        // If no imageTemplate and NOT in learning mode, fail immediately
+                        if (!step.imageTemplate && !learnMode) {
+                            console.error(`❌ No imageTemplate found and learning mode disabled. Cannot proceed with unreliable text-only matching.`);
+                            if (step.optional) {
+                                console.log(`⚠️  Optional step skipped: ${step.description || searchText}`);
+                                return true;
+                            }
+                            return false;
+                        }
+
+                        // Default useCache to true
+                        const shouldUseCache = step.useCache !== false && useCache;
+                        // Note: maxWaitTime and retryIntervalTime already declared above
 
                         // Try multiple image templates if provided (like findAndClickAny)
                         const templatesToTry = step.imageTemplates || (step.imageTemplate ? [step.imageTemplate] : []);
@@ -182,9 +334,10 @@ export async function executeWorkflow(
                                     step.colorFilter,
                                     template,
                                     config.ocr.defaultThreshold,
-                                    true
+                                    true, // multiScale
+                                    true // isLearning: true
                                 );
-                            });
+                            }, false);
 
                             if (retryPos) {
                                 // Save the matched position and bounds to cache
@@ -291,7 +444,8 @@ export async function executeWorkflow(
                                     step.colorFilter,
                                     template,
                                     config.ocr.defaultThreshold,
-                                    true
+                                    true, // multiScale
+                                    true // isLearning: true
                                 );
                             });
 
@@ -322,6 +476,38 @@ export async function executeWorkflow(
 }
 
 /**
+ * Crop a region around a cached position with padding (DRY helper)
+ * @param screenshot - The Jimp screenshot image
+ * @param centerX - Center X coordinate
+ * @param centerY - Center Y coordinate  
+ * @param bounds - Width and height of the region
+ * @param paddingPercent - Padding as percentage (0.2 = 20%)
+ * @returns Cropped image, crop coordinates, and actual dimensions
+ */
+async function cropRegionAroundPosition(
+    screenshot: any, // Jimp instance
+    centerX: number,
+    centerY: number,
+    bounds: { width: number; height: number },
+    paddingPercent: number
+): Promise<{ croppedImage: any; cropX: number; cropY: number; cropWidth: number; cropHeight: number }> {
+    // Calculate search region with padding
+    const searchWidth = Math.round(bounds.width * (1 + paddingPercent));
+    const searchHeight = Math.round(bounds.height * (1 + paddingPercent));
+
+    // Calculate crop bounds (center around cached position)
+    const cropX = Math.max(0, centerX - Math.floor(searchWidth / 2));
+    const cropY = Math.max(0, centerY - Math.floor(searchHeight / 2));
+    const cropWidth = Math.min(searchWidth, screenshot.width - cropX);
+    const cropHeight = Math.min(searchHeight, screenshot.height - cropY);
+
+    // Crop the region
+    const croppedImage = screenshot.clone().crop({ x: cropX, y: cropY, w: cropWidth, h: cropHeight });
+
+    return { croppedImage, cropX, cropY, cropWidth, cropHeight };
+}
+
+/**
  * Verify that a cached position still contains the expected template
  */
 async function verifyCachedPosition(
@@ -338,31 +524,28 @@ async function verifyCachedPosition(
 
         try {
             // Load the template to compare
-            const { loadBase64Image, findTemplateInImage } = await import('./image-matcher');
-            const template = await loadBase64Image(imageTemplate);
+            const { getCachedMat, findTemplateInImage } = await import('./image-matcher');
+            const template = await getCachedMat(imageTemplate);
 
-            // Calculate search region with 20% padding
-            const padding = 0.2;
-            const searchWidth = Math.round(cachedBounds.width * (1 + padding));
-            const searchHeight = Math.round(cachedBounds.height * (1 + padding));
-
-            // Crop region around cached position
+            // Load screenshot
             const Jimp = (await import('jimp')).Jimp;
             const screenshot = await Jimp.read(screenshotPath);
 
-            // Calculate crop bounds (center around cached position)
-            const cropX = Math.max(0, cachedX - Math.floor(searchWidth / 2));
-            const cropY = Math.max(0, cachedY - Math.floor(searchHeight / 2));
-            const cropWidth = Math.min(searchWidth, screenshot.width - cropX);
-            const cropHeight = Math.min(searchHeight, screenshot.height - cropY);
+            // Use DRY helper to crop region around cached position
+            const { croppedImage } = await cropRegionAroundPosition(
+                screenshot,
+                cachedX,
+                cachedY,
+                cachedBounds,
+                0.2 // 20% padding
+            );
 
-            // Crop the region
-            const croppedScreenshot = screenshot.clone().crop({ x: cropX, y: cropY, w: cropWidth, h: cropHeight });
+            // Save cropped image to temp file
             const croppedPath = screenshotPath.replace('.png', '-cropped.png') as `${string}.${string}`;
-            await croppedScreenshot.write(croppedPath);
+            await croppedImage.write(croppedPath);
 
             // Try to match template in cropped region
-            const match = await findTemplateInImage(croppedPath, template, similarity, config.ocr.stepSize);
+            const match = await findTemplateInImage(croppedPath, template, similarity);
 
             // Cleanup
             if (fs.existsSync(croppedPath)) {
@@ -370,10 +553,10 @@ async function verifyCachedPosition(
             }
 
             if (match) {
-                console.log(`✅ Cache verified: template found near cached position`);
+                console.log(`✅ [Cache-Img] Template verified at cached position`);
                 return true;
             } else {
-                console.log(`⚠️  Cache verification failed: template not found at cached position`);
+                console.log(`⚠️  [Cache-Img] Template not found at cached position`);
                 return false;
             }
         } finally {
@@ -389,6 +572,207 @@ async function verifyCachedPosition(
 }
 
 /**
+ * Verify that text exists at a cached position (text verification)
+ * @param cachedX - Cached X coordinate
+ * @param cachedY - Cached Y coordinate
+ * @param textBounds - Bounds of the text region
+ * @param expectedText - Text to search for
+ * @param config - Configuration
+ * @param paddingPercent - Padding percentage (default 0.2 = 20%)
+ * @returns true if text found, false otherwise
+ */
+async function verifyTextAtCachedPosition(
+    cachedX: number,
+    cachedY: number,
+    textBounds: { width: number; height: number },
+    expectedText: string,
+    config: Config,
+    paddingPercent: number = 0.2
+): Promise<boolean> {
+    try {
+        // Capture screenshot
+        const screenshotPath = await captureScreen();
+
+        try {
+            // Load screenshot
+            const Jimp = (await import('jimp')).Jimp;
+            const screenshot = await Jimp.read(screenshotPath);
+
+            // Use DRY helper to crop region around cached position
+            const { croppedImage } = await cropRegionAroundPosition(
+                screenshot,
+                cachedX,
+                cachedY,
+                textBounds,
+                paddingPercent
+            );
+
+            // Save cropped image to temp file for OCR
+            const path = await import('path');
+            const os = await import('os');
+            const tempDir = os.tmpdir();
+            const croppedPath = path.join(tempDir, `text-verify-${Date.now()}.png`) as `${string}.${string}`;
+            await croppedImage.write(croppedPath);
+
+            // Run OCR on cropped region
+            const { findElement } = await import('./ocr');
+            const ocrResult = await findElement(
+                expectedText,
+                config.ocr.minConfidence,
+                undefined, // No region filtering (already cropped)
+                undefined, // No color filter
+                croppedPath
+            );
+
+            // Cleanup cropped file
+            if (fs.existsSync(croppedPath)) {
+                fs.unlinkSync(croppedPath);
+            }
+
+            if (ocrResult) {
+                console.log(`✅ [Cache-Text] Text verified: "${expectedText}" found at cached position`);
+                return true;
+            } else {
+                console.log(`⚠️  [Cache-Text] Text not found at cached position`);
+                return false;
+            }
+        } finally {
+            // Cleanup screenshot
+            if (fs.existsSync(screenshotPath)) {
+                fs.unlinkSync(screenshotPath);
+            }
+        }
+    } catch (error) {
+        console.warn(`⚠️  Text verification error: ${error}`);
+        return false;
+    }
+}
+
+/**
+ * Find text bounds within an image with progressive enlargement (Learning Stage)
+ * Sequence:
+ * 1. Try OCR on template image itself
+ * 2. If not found, use matched (x, y) position for progressive enlargement on FULL SCREEN
+ * 
+ * @param templateBase64 - Base64 encoded template image
+ * @param initialBounds - Initial bounds from image template capture
+ * @param expectedText - Text to search for
+ * @param config - Configuration
+ * @param matchedX - X coordinate of matched position on screen
+ * @param matchedY - Y coordinate of matched position on screen
+ * @returns Text bounds if found, null otherwise
+ */
+async function findTextBoundsWithinImage(
+    templateBase64: string,
+    initialBounds: { width: number; height: number },
+    expectedText: string,
+    config: Config,
+    matchedX: number,
+    matchedY: number
+): Promise<{ width: number; height: number } | null> {
+    const Jimp = (await import('jimp')).Jimp;
+    const path = await import('path');
+    const os = await import('os');
+    const { findElement } = await import('./ocr');
+
+    // Progressive enlargement on FULL SCREENSHOT
+    // Start with template bounds, enlarge if needed to find complete text
+    console.log(`🔍 [Text Bounds] Searching for "${expectedText}" on full screenshot with progressive enlargement...`);
+
+    const maxIterations = 3;
+    const enlargementStep = 0.1; // 10% per iteration
+
+    // Capture screen once for all iterations
+    const screenshotPath = await captureScreen();
+
+    try {
+        const screenshot = await Jimp.read(screenshotPath);
+
+        // Create all 3 iteration promises in parallel
+        const iterationPromises = Array.from({ length: maxIterations }, (_, iteration) =>
+            (async () => {
+                try {
+                    // Calculate bounds for this iteration
+                    const currentBounds = iteration === 0
+                        ? { ...initialBounds }
+                        : {
+                            width: Math.round(initialBounds.width * (1 + enlargementStep * iteration)),
+                            height: Math.round(initialBounds.height * (1 + enlargementStep * iteration))
+                        };
+
+                    console.log(`📐 [Text Bounds] Iteration ${iteration + 1}: Trying ${iteration === 0 ? 'initial' : ''} bounds ${currentBounds.width}×${currentBounds.height}`);
+
+                    // Crop region around matched position
+                    const { croppedImage } = await cropRegionAroundPosition(
+                        screenshot,
+                        matchedX,
+                        matchedY,
+                        currentBounds,
+                        0.2 // 20% padding
+                    );
+
+                    // Save cropped image for OCR
+                    const croppedPath = path.join(os.tmpdir(), `text-bounds-${iteration}-${Date.now()}.png`);
+                    await croppedImage.write(croppedPath);
+
+                    // Run OCR
+                    const ocrResult = await findElement(
+                        expectedText,
+                        config.ocr.minConfidence,
+                        undefined,
+                        undefined,
+                        croppedPath as `${string}.${string}`
+                    );
+
+                    // Cleanup cropped image immediately
+                    if (fs.existsSync(croppedPath)) {
+                        fs.unlinkSync(croppedPath);
+                    }
+
+                    if (ocrResult) {
+                        return {
+                            iteration,
+                            bounds: { width: ocrResult.width, height: ocrResult.height },
+                            success: true
+                        };
+                    }
+                    return null;
+                } catch (error) {
+                    console.warn(`⚠️  [Text Bounds] Error during search (iteration ${iteration + 1}):`, error);
+                    return null;
+                }
+            })()
+        );
+
+        // Wait for all iterations to complete
+        const results = await Promise.allSettled(iterationPromises);
+
+        // Find successful results and select the best (prefer lower iteration number)
+        const successfulResults = results
+            .filter((r): r is PromiseFulfilledResult<{ iteration: number; bounds: { width: number; height: number }; success: true } | null> =>
+                r.status === 'fulfilled' && r.value !== null && r.value.success
+            )
+            .map(r => r.value)
+            .filter((v): v is { iteration: number; bounds: { width: number; height: number }; success: true } => v !== null)
+            .sort((a, b) => a.iteration - b.iteration); // Prefer exact match (iteration 0) over enlarged
+
+        if (successfulResults.length > 0) {
+            const best = successfulResults[0];
+            console.log(`✅ [Text Bounds] Found text at iteration ${best.iteration + 1}: ${best.bounds.width}×${best.bounds.height}`);
+            return best.bounds;
+        }
+    } finally {
+        // Cleanup screenshot only AFTER all iterations complete
+        if (fs.existsSync(screenshotPath)) {
+            fs.unlinkSync(screenshotPath);
+        }
+    }
+
+    console.log(`❌ [Text Bounds] Could not find text "${expectedText}" after ${maxIterations} iterations`);
+    return null;
+}
+
+/**
  * Update cache coordinates if stepID exists and cache is enabled
  */
 function updateCacheIfEnabled(
@@ -398,11 +782,13 @@ function updateCacheIfEnabled(
     y: number,
     useCache?: boolean,
     bounds?: { width: number; height: number },
-    configIndex?: number
+    configIndex?: number,
+    textBounds?: { width: number; height: number },
+    imageSimilarity?: number // Separate parameter for image-specific similarity
 ): void {
     if (stepID && useCache !== false) {
         const workflowPath = path.join(process.cwd(), 'workflow.json');
-        updateStepAfterMatch(stepID, similarity, x, y, workflowPath, bounds, configIndex);
+        updateStepAfterMatch(stepID, similarity, x, y, workflowPath, bounds, configIndex, textBounds, imageSimilarity);
     }
 }
 
@@ -412,9 +798,9 @@ function updateCacheIfEnabled(
 async function handleLearningModeRetry(
     stepID: string,
     config: Config,
-    retryFn: (template: string) => Promise<{ x: number; y: number; bounds?: { width: number; height: number } } | null>,
+    retryFn: (template: string) => Promise<{ x: number; y: number; similarity?: number; bounds?: { width: number; height: number }; imageBounds?: { width: number; height: number } } | null>,
     skipSave?: boolean
-): Promise<{ x: number; y: number; bounds?: { width: number; height: number } } | null> {
+): Promise<{ x: number; y: number; similarity?: number; bounds?: { width: number; height: number }; imageBounds?: { width: number; height: number } } | null> {
     const captureResult = await captureTemplateForStep(stepID);
     if (!captureResult) return null;
 
@@ -513,22 +899,50 @@ async function executeMultiConfigStep(
             if (variant.cachedX !== undefined && variant.cachedY !== undefined && useCache) {
                 console.log(`💾 Found cached position from variant #${i}: (${variant.cachedX}, ${variant.cachedY})`);
 
-                // Verify cache if we have bounds and imageTemplate
-                let useCache = true;
+                // Run image and text verification in parallel to minimize latency
+                const verificationPromises: Promise<boolean>[] = [];
+
+                // Verify image template if available
                 if (variant.cachedBounds && variant.imageTemplate) {
-                    useCache = await verifyCachedPosition(
-                        variant.cachedX,
-                        variant.cachedY,
-                        variant.cachedBounds,
-                        variant.imageTemplate,
-                        variant.imageSimilarity || config.ocr.defaultThreshold,
-                        config
+                    verificationPromises.push(
+                        verifyCachedPosition(
+                            variant.cachedX,
+                            variant.cachedY,
+                            variant.cachedBounds,
+                            variant.imageTemplate,
+                            variant.imageSimilarity || config.ocr.defaultThreshold,
+                            config
+                        )
                     );
+                }
+
+                // Verify text if available
+                if (variant.text && variant.cachedBounds) {
+                    verificationPromises.push(
+                        verifyTextAtCachedPosition(
+                            variant.cachedX,
+                            variant.cachedY,
+                            variant.cachedBounds,
+                            variant.text,
+                            config
+                        )
+                    );
+                }
+
+                // Wait for all verifications to complete
+                let isValid = true;
+                if (verificationPromises.length > 0) {
+                    const results = await Promise.all(verificationPromises);
+                    isValid = results.every(r => r); // All must pass
+
+                    if (!isValid) {
+                        console.log(`⚠️  Cache verification failed for variant #${i}, trying other variants`);
+                    }
                 } else {
                     console.log(`⚠️  No bounds/template for verification, using cache without verification`);
                 }
 
-                if (useCache) {
+                if (isValid) {
                     // Update cache with current values (refreshes timestamp)
                     updateCacheIfEnabled(
                         step.stepID,
@@ -543,8 +957,6 @@ async function executeMultiConfigStep(
                     // Click at cached position
                     await clickAt(variant.cachedX, variant.cachedY);
                     return true;
-                } else {
-                    console.log(`⚠️  Cache verification failed for variant #${i}, trying other variants`);
                 }
             }
         }
@@ -629,9 +1041,9 @@ async function executeMultiConfigStep(
             // Extract bounds from the captured template
             let templateBounds: { width: number; height: number } | undefined;
             try {
-                const { loadBase64Image } = await import('./image-matcher');
-                const templateImg = await loadBase64Image(template);
-                templateBounds = { width: templateImg.width, height: templateImg.height };
+                const { getCachedMat } = await import('./image-matcher');
+                const templateImg = await getCachedMat(template);
+                templateBounds = { width: templateImg.cols, height: templateImg.rows };
             } catch (e) {
                 console.warn('⚠️  Could not extract template bounds');
             }

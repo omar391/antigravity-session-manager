@@ -4,7 +4,8 @@ import * as path from 'path';
 import * as os from 'os';
 import { screen, imageToJimp } from "@nut-tree-fork/nut-js";
 import { Jimp } from 'jimp';
-import { loadBase64Image, findTemplateInImage, findTemplateMultiScale, type TemplateMatch } from './image-matcher';
+import { distance } from 'fastest-levenshtein';
+import { getCachedMat, findTemplateInImage, findTemplateMultiScale, type TemplateMatch } from './image-matcher';
 import type { Config, ElementPosition } from './types';
 import { getEffectiveConfig } from './constants';
 
@@ -78,13 +79,27 @@ export async function captureScreen(outputPath?: string): Promise<string> {
     const screenshotPath = outputPath || path.join(TEMP_DIR, `screenshot-${Date.now()}.png`);
 
     try {
-        // Capture entire screen using nut.js
-        // Use grab() instead of capture() to get the image in memory without saving
-        const img = await screen.grab();
+        // Get actual screen dimensions to capture only the main screen
+        const screenWidth = await screen.width();
+        const screenHeight = await screen.height();
 
-        // Convert to Jimp and save
-        const jimpImg = await imageToJimp(img);
-        await jimpImg.writeAsync(screenshotPath);
+        // Use macOS screencapture with explicit region bounds
+        // -R: Capture specific region (x,y,width,height)
+        // -x: Do not play sound
+        const { spawnSync } = require('child_process');
+        const result = spawnSync('screencapture', [
+            '-R', `0,0,${screenWidth},${screenHeight}`,
+            '-x',
+            screenshotPath
+        ]);
+
+        if (result.error) {
+            throw new Error(`screencapture failed: ${result.error}`);
+        }
+
+        if (!fs.existsSync(screenshotPath)) {
+            throw new Error('Screenshot file was not created');
+        }
 
         return screenshotPath;
     } catch (error) {
@@ -102,8 +117,9 @@ export async function detectTextFromTemplate(templateDataUrl: string): Promise<s
 
     try {
         // Load and save the base64 image
-        const image = await loadBase64Image(templateDataUrl);
-        await image.write(tempPath);
+        const base64String = templateDataUrl.replace(/^data:image\/\w+;base64,/, '');
+        const buffer = Buffer.from(base64String, 'base64');
+        fs.writeFileSync(tempPath, buffer);
 
         // Run OCR
         const results = await detectText(tempPath);
@@ -171,47 +187,33 @@ export async function detectText(imagePath: string): Promise<OCRResult[]> {
             }
         }
 
-        // Cleanup temp file
-        if (fs.existsSync(tsvPath)) {
-            fs.unlinkSync(tsvPath);
-        }
+        // Note: TSV cleanup handled by caller to prevent race conditions in multi-variant scenarios
+        // Caller should clean up using: if (fs.existsSync(tsvPath)) { fs.unlinkSync(tsvPath); }
 
         return results;
     } catch (error) {
+        // Cleanup TSV on error
+        if (fs.existsSync(tsvPath)) {
+            fs.unlinkSync(tsvPath);
+        }
         throw new Error(`OCR detection failed: ${error}`);
     }
 }
 
 /**
- * Calculate string similarity using Levenshtein distance
+ * Calculate string similarity using optimized Levenshtein distance (fastest-levenshtein)
  */
 function stringSimilarity(str1: string, str2: string): number {
     const s1 = str1.toLowerCase();
     const s2 = str2.toLowerCase();
 
-    const len1 = s1.length;
-    const len2 = s2.length;
+    if (s1 === s2) return 1.0;
+    if (s1.length === 0 || s2.length === 0) return 0.0;
 
-    const matrix: number[][] = Array(len1 + 1).fill(null).map(() => Array(len2 + 1).fill(0));
+    const dist = distance(s1, s2);
+    const maxLen = Math.max(s1.length, s2.length);
 
-    for (let i = 0; i <= len1; i++) matrix[i][0] = i;
-    for (let j = 0; j <= len2; j++) matrix[0][j] = j;
-
-    for (let i = 1; i <= len1; i++) {
-        for (let j = 1; j <= len2; j++) {
-            const cost = s1[i - 1] === s2[j - 1] ? 0 : 1;
-            matrix[i][j] = Math.min(
-                matrix[i - 1][j] + 1,      // deletion
-                matrix[i][j - 1] + 1,      // insertion
-                matrix[i - 1][j - 1] + cost // substitution
-            );
-        }
-    }
-
-    const distance = matrix[len1][len2];
-    const maxLen = Math.max(len1, len2);
-
-    return 1 - (distance / maxLen);
+    return 1 - (dist / maxLen);
 }
 
 /**
@@ -258,24 +260,30 @@ export async function findElementByImage(
 ): Promise<{ x: number; y: number; similarity: number; bounds: { width: number; height: number } } | null> {
     try {
         // Load template
-        const template = await loadBase64Image(imageTemplate);
+        const template = await getCachedMat(imageTemplate);
 
         let match: TemplateMatch | null = null;
         // Try multi-scale matching if enabled
         if (multiScale) {
-            match = await findTemplateMultiScale(screenshotPath, template, similarity, config.ocr.scales, config.ocr.stepSize);
+            match = await findTemplateMultiScale(screenshotPath, template, similarity, config.ocr.scales);
         } else {
-            match = await findTemplateInImage(screenshotPath, template, similarity, config.ocr.stepSize);
+            match = await findTemplateInImage(screenshotPath, template, similarity);
         }
 
         if (match) {
-            console.log(`🖼️  Image match found at (${match.x}, ${match.y}) [similarity: ${match.similarity.toFixed(2)}]`);
+            console.log(`🖼️  [Img-Search] Match found at (${match.x}, ${match.y}) [similarity: ${match.similarity.toFixed(2)}]`);
             return { x: match.x, y: match.y, similarity: match.similarity, bounds: match.bounds };
         }
 
         return null;
     } catch (error) {
-        console.error(`❌ Image matching error: ${error}`);
+        console.error(`❌ [Img-Search] Image matching error: ${error}`);
+        // Log more details about the error
+        if (error instanceof Error) {
+            console.error(`   Error message: ${error.message}`);
+            console.error(`   Stack: ${error.stack?.substring(0, 200)}`);
+        }
+        console.error(`   Template length: ${imageTemplate.length} chars`);
         return null;
     }
 }
@@ -377,6 +385,12 @@ export async function findElement(
         // Detect text
         let ocrResults = await detectText(screenshotPath);
 
+        // Cleanup TSV file after reading (safe here since single-threaded execution)
+        const tsvPath = screenshotPath.replace('.png', '.tsv');
+        if (fs.existsSync(tsvPath)) {
+            fs.unlinkSync(tsvPath);
+        }
+
         if (debugMode) {
             console.log(`📋 OCR detected ${ocrResults.length} text elements`);
             console.log('Top 10 detected texts:', ocrResults.slice(0, 10).map(r => r.text).join(', '));
@@ -465,7 +479,7 @@ export async function findElement(
             const centerX = bestMatch.x + Math.floor(bestMatch.width / 2);
             const centerY = bestMatch.y + Math.floor(bestMatch.height / 2);
 
-            console.log(`✅ Found: "${bestMatch.text}" at (${centerX}, ${centerY}) [similarity: ${bestSimilarity.toFixed(2)}]`);
+            console.log(`✅ [OCR-Search] Found: "${bestMatch.text}" at (${centerX}, ${centerY}) [confidence: ${bestSimilarity.toFixed(2)}]`);
 
             return {
                 x: centerX,
@@ -620,39 +634,42 @@ export async function findElementCached(
  * @param imageTemplate - Base64 encoded PNG template for image matching
  * @param imageSimilarity - Minimum similarity threshold (0-1), overrides global default
  * @param multiScale - Try multiple scales for resolution independence
+ * @param isLearning - true during learning mode to wait for both image+OCR
  * @returns Position {x, y} if found, null otherwise
  */
 export async function findElementWithRetry(
-    elementName: string,
+    cacheKey: string,
     searchText: string,
-    useCache: boolean,
-    region: string | undefined,
-    maxWait: number,
-    retryInterval: number,
+    disableCache: boolean,
+    region?: string,
+    maxWait: number = 30000,
+    retryInterval: number = 1000,
     colorFilter?: string,
     imageTemplate?: string,
     imageSimilarity?: number,
-    multiScale?: boolean
-): Promise<{ x: number; y: number; bounds?: { width: number; height: number } } | null> {
+    multiScale?: boolean,
+    isLearning: boolean = false // NEW: true during learning mode to wait for both image+OCR
+): Promise<{ x: number; y: number; similarity?: number; bounds?: { width: number; height: number }; imageBounds?: { width: number; height: number } } | null> {
     const startTime = Date.now();
 
     // Note: Cache verification is handled by workflow.ts using cachedX/cachedY fields
     // This function only performs element detection
 
     // Helper for image matching
-    const tryImages = async (screenshotPath: string): Promise<{ x: number; y: number; bounds?: { width: number; height: number } } | null> => {
+    const tryImages = async (screenshotPath: string): Promise<{ x: number; y: number; similarity?: number; bounds?: { width: number; height: number } } | null> => {
         if (!imageTemplate) return null;
         return await findElementByImage(screenshotPath, imageTemplate, imageSimilarity || config.ocr.defaultThreshold, multiScale || false, config);
     };
 
     // Helper for OCR
-    const tryOCR = async (screenshotPath: string): Promise<{ x: number; y: number; bounds?: { width: number; height: number } } | null> => {
+    const tryOCR = async (screenshotPath: string): Promise<{ x: number; y: number; similarity?: number; bounds?: { width: number; height: number } } | null> => {
         const result = await findElement(searchText, config.ocr.minConfidence, region, colorFilter, screenshotPath);
         if (result) {
             // Extract bounds from OCR result
             return {
                 x: result.x,
                 y: result.y,
+                similarity: 1.0, // OCR text match is considered perfect when found
                 bounds: { width: result.width, height: result.height }
             };
         }
@@ -689,32 +706,147 @@ export async function findElementWithRetry(
 
         // Run all methods in parallel using the SAME screenshot
         try {
-            const promises: Promise<{ x: number; y: number; bounds?: { width: number; height: number } } | null>[] = [];
+            const promises: Promise<{ x: number; y: number; similarity?: number; bounds?: { width: number; height: number }; method: string } | null>[] = [];
 
-            // 1. Image Matching
+            // 1. Image Matching - Try multiple similarity levels in parallel
+            const imagePromises: Promise<{ x: number; y: number; similarity?: number; bounds?: { width: number; height: number }; method: string } | null>[] = [];
             if (imageTemplate) {
-                // Use current dynamic similarity
-                promises.push(findElementByImage(screenshotPath, imageTemplate, currentSimilarity, multiScale || false, config));
+                // Generate ALL similarity levels from initial down to min using decay rate
+                const similarityLevels: number[] = [];
+                let currentSim = currentSimilarity;
+                while (currentSim >= minSimilarity) {
+                    similarityLevels.push(currentSim);
+                    currentSim -= decayRate;
+                }
+                // Ensure minSimilarity is included if not already
+                if (similarityLevels[similarityLevels.length - 1] !== minSimilarity) {
+                    similarityLevels.push(minSimilarity);
+                }
+
+                console.log(`🖼️  [Img-Search] Trying ${similarityLevels.length} similarity levels in parallel: ${similarityLevels.map(s => s.toFixed(2)).join(', ')}`);
+
+                for (const simLevel of similarityLevels) {
+                    const promise = findElementByImage(screenshotPath, imageTemplate, simLevel, multiScale || false, config)
+                        .then(res => res ? { ...res, method: `image-${simLevel.toFixed(2)}` } : null);
+                    imagePromises.push(promise);
+                    promises.push(promise);
+                }
             }
 
-            // 3. OCR (Always try)
-            promises.push(tryOCR(screenshotPath));
+            // 2. OCR (Always try)
+            promises.push(tryOCR(screenshotPath).then(res => res ? { ...res, method: 'ocr' } : null));
 
-            // Wait for the first successful result (non-null)
-            // Promise.any would be ideal but might not be available in all environments
-            // We'll use a custom race that ignores nulls until all fail
-            const result = await Promise.any(promises.map(p => p.then(res => {
-                if (res === null) throw new Error('Not found');
-                return res;
-            })));
+            let result: { x: number; y: number; similarity?: number; bounds?: { width: number; height: number }; method: string } | null = null;
+
+            if (isLearning) {
+                // Learning mode: Wait for ALL to complete to get real image similarity
+                console.log(`🎓 [Learning] Waiting for both image and OCR to complete...`);
+
+                // Apply timeout to prevent hanging on slow image searches
+                const timeoutPromise = new Promise<never>((_, reject) =>
+                    setTimeout(() => reject(new Error('Learning mode timeout')), config.ocr.learningModeRetryTimeout)
+                );
+
+                let results: PromiseSettledResult<{ x: number; y: number; similarity?: number; bounds?: { width: number; height: number }; method: string } | null>[];
+                try {
+                    results = await Promise.race([
+                        Promise.allSettled(promises),
+                        timeoutPromise
+                    ]) as PromiseSettledResult<{ x: number; y: number; similarity?: number; bounds?: { width: number; height: number }; method: string } | null>[];
+                } catch (e) {
+                    console.log(`⏱️  [Learning] Timeout after ${config.ocr.learningModeRetryTimeout}ms - using partial results`);
+                    // Timeout occurred - no results available
+                    results = [];
+                }
+
+                // Prefer image result (for similarity), fall back to OCR for position
+                const successfulResults = results
+                    .filter((r): r is PromiseFulfilledResult<{ x: number; y: number; similarity?: number; bounds?: { width: number; height: number }; method: string } | null> =>
+                        r.status === 'fulfilled' && r.value !== null
+                    )
+                    .map(r => r.value)
+                    .filter((v): v is { x: number; y: number; similarity?: number; bounds?: { width: number; height: number }; method: string } => v !== null);
+
+                // Prefer image match over OCR (to get real similarity)
+                const imageResult = successfulResults.find(r => r.method.startsWith('image-'));
+                result = imageResult || successfulResults[0] || null;
+
+                if (successfulResults.length > 0) {
+                    console.log(`🎓 [Learning] Completed: ${successfulResults.map(r => r.method).join(', ')}`);
+                }
+            } else {
+                // Runtime: Use first winner for speed
+                try {
+                    result = await Promise.any(promises.map(p => p.then(res => {
+                        if (res === null) throw new Error('Not found');
+                        return res;
+                    })));
+                } catch {
+                    // All failed
+                }
+            }
 
             if (result) {
-                // Note: Position caching is handled by workflow.ts using cachedX/cachedY fields
-                // Clean up screenshot before returning
+                console.log(`✅ Winner: ${result.method}`);
+
+                // Get image result separately for bounds preservation
+                let imageBounds: { width: number; height: number } | undefined;
+                if (imagePromises.length > 0) {
+                    try {
+                        // Wait a bit for image results to complete
+                        const imageResults = await Promise.race([
+                            Promise.all(imagePromises),
+                            new Promise<null[]>((resolve) => setTimeout(() => resolve([]), 100))
+                        ]);
+
+                        if (imageResults) {
+                            const successfulImageResult = imageResults.find(r => r !== null);
+                            if (successfulImageResult?.bounds) {
+                                imageBounds = successfulImageResult.bounds;
+                            }
+                        }
+                    } catch {
+                        // Image match failed or timed out, no bounds
+                    }
+                }
+
+                // NORMALIZE COORDINATES: Convert from screenshot pixels to logical points
+                // This handles Retina (2x) vs Standard (1x) displays dynamically
+                try {
+                    const screenshotImage = await Jimp.read(screenshotPath);
+                    const logicalWidth = await screen.width();
+                    const scaleFactor = screenshotImage.width / logicalWidth;
+
+                    if (Math.abs(scaleFactor - 1.0) > 0.1) {
+                        console.log(`📏 Normalizing coordinates (Scale: ${scaleFactor.toFixed(2)}x)`);
+                        result.x = Math.round(result.x / scaleFactor);
+                        result.y = Math.round(result.y / scaleFactor);
+                        if (result.bounds) {
+                            result.bounds.width = Math.round(result.bounds.width / scaleFactor);
+                            result.bounds.height = Math.round(result.bounds.height / scaleFactor);
+                        }
+                        if (imageBounds) {
+                            imageBounds.width = Math.round(imageBounds.width / scaleFactor);
+                            imageBounds.height = Math.round(imageBounds.height / scaleFactor);
+                        }
+                    }
+                } catch (err) {
+                    console.warn(`⚠️ Failed to normalize coordinates: ${err}`);
+                }
+
+                // Cleanup screenshot
                 if (fs.existsSync(screenshotPath)) {
                     fs.unlinkSync(screenshotPath);
                 }
-                return result;
+
+                // Return result with both winner's position and image bounds
+                return {
+                    x: result.x,
+                    y: result.y,
+                    similarity: result.similarity,
+                    bounds: result.bounds,
+                    imageBounds // Preserve image bounds separately
+                };
             }
         } catch (e) {
             // All methods failed for this iteration

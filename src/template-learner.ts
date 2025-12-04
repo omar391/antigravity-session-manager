@@ -36,6 +36,10 @@ export async function captureTemplateForStep(stepID: string): Promise<{ dataUrl:
         // Load and process image
         const jimpImg = await Jimp.read(tempPath);
 
+        // NO RESIZE! Keep template at native resolution (2x on Retina)
+        // This matches our screenshot resolution (screencapture -R also captures at physical pixels)
+        // Coordinate normalization happens later in ocr.ts (divides by scale factor)
+
         // Convert to base64
         const buffer = await jimpImg.getBuffer('image/png');
         const base64 = buffer.toString('base64');
@@ -63,7 +67,8 @@ export function saveTemplateToWorkflow(
     dataUrl: string,
     bounds: { width: number; height: number },
     workflowPath: string,
-    variantIndex?: number
+    variantIndex?: number,
+    textBounds?: { width: number; height: number }
 ) {
     try {
         const content = fs.readFileSync(workflowPath, 'utf-8');
@@ -79,20 +84,26 @@ export function saveTemplateToWorkflow(
                     if (variantIndex !== undefined && step.variants && Array.isArray(step.variants) && step.variants[variantIndex]) {
                         step.variants[variantIndex].imageTemplate = dataUrl;
                         step.variants[variantIndex].imageTemplateBounds = bounds;
+                        if (textBounds) {
+                            step.variants[variantIndex].textBounds = textBounds;
+                        }
                         // Set default similarity if not present
                         if (!step.variants[variantIndex].imageSimilarity) {
                             step.variants[variantIndex].imageSimilarity = 0.85;
                         }
-                        console.log(`💾 Saved new template to workflow.json for step "${stepID}" variant [${variantIndex}]`);
+                        console.log(`💾 Saved new template to workflow.json for step "${stepID}"[${variantIndex}]${textBounds ? ` with text bounds ${textBounds.width}×${textBounds.height}` : ''}`);
                     } else {
-                        // Save to parent step (original behavior)
+                        // Save to main step
                         step.imageTemplate = dataUrl;
                         step.imageTemplateBounds = bounds;
+                        if (textBounds) {
+                            step.textBounds = textBounds;
+                        }
                         // Set default similarity if not present
                         if (!step.imageSimilarity) {
                             step.imageSimilarity = 0.85; // Default threshold
                         }
-                        console.log(`💾 Saved new template to workflow.json for step "${stepID}"`);
+                        console.log(`💾 Saved new template to workflow.json for step "${stepID}"${textBounds ? ` with text bounds ${textBounds.width}×${textBounds.height}` : ''}`);
                     }
                     updated = true;
                     break;
@@ -123,7 +134,9 @@ export function updateStepAfterMatch(
     y: number,
     workflowPath: string,
     bounds?: { width: number; height: number },
-    configIndex?: number
+    configIndex?: number,
+    textBounds?: { width: number; height: number },
+    imageSimilarity?: number // Only provided when image search succeeded
 ): boolean {
     try {
         const content = fs.readFileSync(workflowPath, 'utf-8');
@@ -141,9 +154,9 @@ export function updateStepAfterMatch(
                         targetStep = step.variants[configIndex];
                     }
 
-                    // Only update similarity if step has an image template
-                    if (targetStep.imageTemplate || targetStep.imageTemplates) {
-                        targetStep.imageSimilarity = matchedSimilarity;
+                    // Only update imageSimilarity if image search won (indicated by imageSimilarity parameter)
+                    if (imageSimilarity !== undefined && (targetStep.imageTemplate || targetStep.imageTemplates)) {
+                        targetStep.imageSimilarity = imageSimilarity;
                     }
                     // Always save cached coordinates
                     targetStep.cachedX = x;
@@ -151,6 +164,10 @@ export function updateStepAfterMatch(
                     // Save cached bounds if provided
                     if (bounds) {
                         targetStep.cachedBounds = bounds;
+                    }
+                    // Save text bounds if provided
+                    if (textBounds) {
+                        targetStep.textBounds = textBounds;
                     }
                     updated = true;
                     break;
@@ -160,13 +177,12 @@ export function updateStepAfterMatch(
 
         if (updated) {
             fs.writeFileSync(workflowPath, JSON.stringify(json, null, 4));
-            console.log(`💾 Updated step \"${stepID}\"${configIndex !== undefined ? `[${configIndex}]` : ''} with similarity=${matchedSimilarity.toFixed(2)}, x=${x}, y=${y}`);
+            console.log(`💾 Updated step "${stepID}"${configIndex !== undefined ? `[${configIndex}]` : ''} with similarity=${matchedSimilarity.toFixed(2)}, x=${x}, y=${y}`);
             return true;
         }
         return false;
     } catch (error) {
-        console.error('❌ Failed to update workflow step:', error);
+        console.error(`Failed to update workflow after match:`, error);
         return false;
     }
 }
-

@@ -7,102 +7,162 @@ export interface TemplateMatch {
     bounds: { width: number; height: number };
 }
 
+// OpenCV instance - must be set before use via initOpenCV()
+let cv: any = null;
+
 /**
- * Load base64 encoded image
+ * Initialize OpenCV. Must be called once at application startup.
+ * Call this from the main entry point (index.ts) before using any image matching functions.
  */
-export async function loadBase64Image(base64Data: string): Promise<any> {
-    // Remove data URL prefix if present
-    const base64String = base64Data.replace(/^data:image\/\w+;base64,/, '');
-    const buffer = Buffer.from(base64String, 'base64');
-    return await Jimp.read(buffer);
+export async function initOpenCV(): Promise<void> {
+    if (cv) return; // Already initialized
+
+    console.log('🖼️  Initializing OpenCV-WASM...');
+    const startTime = Date.now();
+    const module = await require('opencv-wasm');
+    cv = module.cv;
+    console.log(`🖼️  OpenCV initialized in ${Date.now() - startTime}ms`);
 }
 
 /**
- * Calculate similarity between two image regions (0-1)
- * Uses normalized cross-correlation
+ * Check if OpenCV is initialized
  */
-function calculateSimilarity(
-    screenshot: any,
-    template: any,
-    x: number,
-    y: number
-): number {
-    const templateWidth = template.width;
-    const templateHeight = template.height;
+export function isOpenCVReady(): boolean {
+    return cv !== null;
+}
 
-    // Check bounds
-    if (x + templateWidth > screenshot.width || y + templateHeight > screenshot.height) {
-        return 0;
+// Cache for loaded Mat objects (key: base64 hash, value: Mat)
+const matCache = new Map<string, any>();
+
+/**
+ * Simple hash function for cache keys
+ */
+function hashString(str: string): string {
+    let hash = 0;
+    for (let i = 0; i < Math.min(str.length, 1000); i++) {
+        const char = str.charCodeAt(i);
+        hash = ((hash << 5) - hash) + char;
+        hash = hash & hash; // Convert to 32-bit integer
+    }
+    return hash.toString(36);
+}
+
+/**
+ * Get or create cached Mat from base64 image
+ */
+export async function getCachedMat(base64Data: string): Promise<any> {
+    const cacheKey = hashString(base64Data);
+
+    if (matCache.has(cacheKey)) {
+        return matCache.get(cacheKey);
     }
 
-    let totalDiff = 0;
-    let pixelCount = 0;
+    const mat = await loadBase64Image(base64Data);
+    matCache.set(cacheKey, mat);
+    return mat;
+}
 
-    // Compare pixels
-    for (let ty = 0; ty < templateHeight; ty++) {
-        for (let tx = 0; tx < templateWidth; tx++) {
-            const sx = x + tx;
-            const sy = y + ty;
-
-            // Get pixel indices
-            const tIdx = (ty * template.width + tx) * 4;
-            const sIdx = (sy * screenshot.width + sx) * 4;
-
-            // Compare RGB (ignore alpha)
-            const rDiff = Math.abs(template.bitmap.data[tIdx] - screenshot.bitmap.data[sIdx]);
-            const gDiff = Math.abs(template.bitmap.data[tIdx + 1] - screenshot.bitmap.data[sIdx + 1]);
-            const bDiff = Math.abs(template.bitmap.data[tIdx + 2] - screenshot.bitmap.data[sIdx + 2]);
-
-            totalDiff += (rDiff + gDiff + bDiff) / 3;
-            pixelCount++;
+/**
+ * Clear Mat cache (call when templates change)
+ */
+export function clearMatCache(): void {
+    for (const mat of matCache.values()) {
+        if (mat && mat.delete) {
+            mat.delete();
         }
     }
-
-    // Normalize to 0-1 (1 = perfect match)
-    const avgDiff = totalDiff / pixelCount;
-    return 1 - (avgDiff / 255);
+    matCache.clear();
 }
 
 /**
- * Find template in screenshot using sliding window
+ * Load base64 encoded image as OpenCV Mat
+ * Requires initOpenCV() to be called first
+ */
+export async function loadBase64Image(base64Data: string): Promise<any> {
+    if (!cv) throw new Error('OpenCV not initialized. Call initOpenCV() first.');
+
+    // Remove data URL prefix and decode
+    const base64String = base64Data.replace(/^data:image\/\w+;base64,/, '');
+    const buffer = Buffer.from(base64String, 'base64');
+
+    // Use Jimp to decode image
+    const jimpImg = await Jimp.read(buffer);
+
+    // Convert to OpenCV Mat using matFromImageData
+    return cv.matFromImageData({
+        data: new Uint8ClampedArray(jimpImg.bitmap.data),
+        width: jimpImg.width,
+        height: jimpImg.height
+    });
+}
+
+/**
+ * Load image file as OpenCV Mat using Jimp
+ */
+async function loadImageFile(imagePath: string): Promise<any> {
+    if (!cv) throw new Error('OpenCV not initialized. Call initOpenCV() first.');
+
+    const jimpImg = await Jimp.read(imagePath);
+
+    return cv.matFromImageData({
+        data: new Uint8ClampedArray(jimpImg.bitmap.data),
+        width: jimpImg.width,
+        height: jimpImg.height
+    });
+}
+
+/**
+ * Find template in screenshot using OpenCV matchTemplate
+ * Uses TM_CCOEFF_NORMED for normalized cross-correlation matching
+ * 
+ * Performance: ~2s for 3456x2234 screenshot with 100x100 template
+ * (vs ~20s with our previous custom sliding window implementation)
  */
 export async function findTemplateInImage(
     screenshotPath: string,
     template: any,
-    similarityThreshold: number,
-    stepSize: number
+    similarityThreshold: number
 ): Promise<TemplateMatch | null> {
-    const screenshot = await Jimp.read(screenshotPath);
+    if (!cv) throw new Error('OpenCV not initialized. Call initOpenCV() first.');
 
-    const templateWidth = template.width;
-    const templateHeight = template.height;
+    try {
+        // Load screenshot
+        const screenshot = await loadImageFile(screenshotPath);
 
-    let bestMatch: TemplateMatch | null = null;
-
-    // Sliding window search
-    for (let y = 0; y <= screenshot.height - templateHeight; y += stepSize) {
-        for (let x = 0; x <= screenshot.width - templateWidth; x += stepSize) {
-            const similarity = calculateSimilarity(screenshot, template, x, y);
-
-            if (similarity >= similarityThreshold) {
-                if (!bestMatch || similarity > bestMatch.similarity) {
-                    bestMatch = {
-                        x: x + templateWidth / 2,  // Return center point
-                        y: y + templateHeight / 2,
-                        similarity,
-                        bounds: { width: templateWidth, height: templateHeight }
-                    };
-
-                    // Early exit if perfect match
-                    if (similarity > 0.99) {
-                        return bestMatch;
-                    }
-                }
-            }
+        // Validate dimensions
+        if (template.rows > screenshot.rows || template.cols > screenshot.cols) {
+            screenshot.delete();
+            return null;
         }
-    }
 
-    return bestMatch;
+        // Perform template matching using TM_CCOEFF_NORMED
+        const resultMat = new cv.Mat();
+        cv.matchTemplate(screenshot, template, resultMat, cv.TM_CCOEFF_NORMED);
+
+        // Find best match location
+        const mask = new cv.Mat();
+        const minMax = cv.minMaxLoc(resultMat, mask);
+        const similarity = minMax.maxVal;
+
+        // Cleanup
+        mask.delete();
+        resultMat.delete();
+        screenshot.delete();
+
+        if (similarity >= similarityThreshold) {
+            return {
+                x: minMax.maxLoc.x + template.cols / 2,
+                y: minMax.maxLoc.y + template.rows / 2,
+                similarity,
+                bounds: { width: template.cols, height: template.rows }
+            };
+        }
+
+        return null;
+    } catch (error) {
+        console.error('OpenCV template matching error:', error);
+        return null;
+    }
 }
 
 /**
@@ -112,33 +172,46 @@ export async function findTemplateMultiScale(
     screenshotPath: string,
     template: any,
     similarityThreshold: number,
-    scales: number[],
-    stepSize: number
+    scales: number[]
 ): Promise<TemplateMatch | null> {
+    if (!cv) throw new Error('OpenCV not initialized. Call initOpenCV() first.');
+
     let bestMatch: TemplateMatch | null = null;
 
-    for (const scale of scales) {
-        // Skip if scale is 1.0 (already tried)
-        if (Math.abs(scale - 1.0) < 0.01 && bestMatch) continue;
+    try {
+        for (const scale of scales) {
+            let scaledTemplate = template;
 
-        const scaledTemplate = template.clone();
-        scaledTemplate.resize({
-            w: Math.floor(template.width * scale),
-            h: Math.floor(template.height * scale)
-        });
+            // Resize if scale differs significantly from 1.0
+            if (Math.abs(scale - 1.0) > 0.01) {
+                scaledTemplate = new cv.Mat();
+                const newSize = new cv.Size(
+                    Math.floor(template.cols * scale),
+                    Math.floor(template.rows * scale)
+                );
+                cv.resize(template, scaledTemplate, newSize);
+            }
 
-        const match = await findTemplateInImage(screenshotPath, scaledTemplate, similarityThreshold, stepSize);
+            const match = await findTemplateInImage(screenshotPath, scaledTemplate, similarityThreshold);
 
-        if (match) {
-            if (!bestMatch || match.similarity > bestMatch.similarity) {
-                bestMatch = match;
+            // Clean up scaled template if we created one
+            if (scaledTemplate !== template) {
+                scaledTemplate.delete();
+            }
 
-                // Early exit if very good match
-                if (match.similarity > 0.95) {
-                    return bestMatch;
+            if (match) {
+                if (!bestMatch || match.similarity > bestMatch.similarity) {
+                    bestMatch = match;
+
+                    // Early exit on excellent match
+                    if (match.similarity > 0.99) {
+                        return bestMatch;
+                    }
                 }
             }
         }
+    } catch (error) {
+        console.error('OpenCV multi-scale matching error:', error);
     }
 
     return bestMatch;

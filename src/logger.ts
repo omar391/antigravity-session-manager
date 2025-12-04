@@ -8,21 +8,24 @@ export function setupLogger() {
     const originalWarn = console.warn;
 
     function getTimestamp() {
-        return new Date().toISOString().substr(11, 12); // HH:mm:ss.mmm
+        return new Date().toLocaleTimeString('en-US', {
+            hour12: true,
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            fractionalSecondDigits: 3
+        });
     }
 
     console.log = function (...args: any[]) {
-        const ts = getTimestamp();
-        originalLog.apply(console, [`[${ts}]`, ...args]);
+        originalLog(`[${getTimestamp()}]`, ...args);
     };
 
     console.error = function (...args: any[]) {
-        const ts = getTimestamp();
-        originalError.apply(console, [`[${ts}]`, ...args]);
+        originalError(`[${getTimestamp()}]`, ...args);
     };
 
     console.warn = function (...args: any[]) {
-        const ts = getTimestamp();
-        originalWarn.apply(console, [`[${ts}]`, ...args]);
+        originalWarn(`[${getTimestamp()}]`, ...args);
     };
 }
