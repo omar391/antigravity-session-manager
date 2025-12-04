@@ -175,8 +175,7 @@ export async function executeWorkflow(
                                     step.colorFilter,
                                     template,
                                     config.ocr.defaultThreshold,
-                                    true, // multiScale
-                                    true // isLearning: true
+                                    true // multiScale
                                 );
                             }, false);
 
@@ -334,8 +333,7 @@ export async function executeWorkflow(
                                     step.colorFilter,
                                     template,
                                     config.ocr.defaultThreshold,
-                                    true, // multiScale
-                                    true // isLearning: true
+                                    true // multiScale
                                 );
                             }, false);
 
@@ -444,8 +442,7 @@ export async function executeWorkflow(
                                     step.colorFilter,
                                     template,
                                     config.ocr.defaultThreshold,
-                                    true, // multiScale
-                                    true // isLearning: true
+                                    true // multiScale
                                 );
                             });
 
@@ -531,34 +528,56 @@ async function verifyCachedPosition(
             const Jimp = (await import('jimp')).Jimp;
             const screenshot = await Jimp.read(screenshotPath);
 
-            // Use DRY helper to crop region around cached position
-            const { croppedImage } = await cropRegionAroundPosition(
+            // FIX: Scale cached coordinates from logical (1x) to screenshot pixels
+            // Cached coordinates are in logical points, but screenshot is at native resolution
+            const { screen } = await import('@nut-tree-fork/nut-js');
+            const logicalWidth = await screen.width();
+            const scaleFactor = screenshot.width / logicalWidth;
+
+            const scaledX = Math.round(cachedX * scaleFactor);
+            const scaledY = Math.round(cachedY * scaleFactor);
+
+            // Use template's actual dimensions (already at native resolution)
+            // instead of cachedBounds which may have been normalized
+            const templateBounds = {
+                width: template.cols,
+                height: template.rows
+            };
+
+            // Use DRY helper to crop region around scaled position
+            const { croppedImage, cropX, cropY, cropWidth, cropHeight } = await cropRegionAroundPosition(
                 screenshot,
-                cachedX,
-                cachedY,
-                cachedBounds,
-                0.2 // 20% padding
+                scaledX,
+                scaledY,
+                templateBounds, // Use template dimensions, not cachedBounds
+                0.5 // 50% padding for extra margin
             );
 
-            // Save cropped image to temp file
-            const croppedPath = screenshotPath.replace('.png', '-cropped.png') as `${string}.${string}`;
-            await croppedImage.write(croppedPath);
+            console.log(`🔍 [Cache-Debug] Template: ${template.cols}x${template.rows}, Cropped: ${cropWidth}x${cropHeight}, Position: (${scaledX},${scaledY}), Crop: (${cropX},${cropY})`);
 
-            // Try to match template in cropped region
-            const match = await findTemplateInImage(croppedPath, template, similarity);
-
-            // Cleanup
-            if (fs.existsSync(croppedPath)) {
-                fs.unlinkSync(croppedPath);
-            }
+            // First try matching on full screenshot to verify template works
+            const verificationThreshold = 0.75;
+            let match = await findTemplateInImage(screenshotPath, template, verificationThreshold);
 
             if (match) {
-                console.log(`✅ [Cache-Img] Template verified at cached position`);
-                return true;
-            } else {
-                console.log(`⚠️  [Cache-Img] Template not found at cached position`);
-                return false;
+                console.log(`✅ [Cache-Img] Found on full screenshot at (${match.x},${match.y}) [similarity: ${match.similarity.toFixed(2)}]`);
+                // Check if match is near expected position
+                const distX = Math.abs(match.x - scaledX);
+                const distY = Math.abs(match.y - scaledY);
+                if (distX < templateBounds.width * 2 && distY < templateBounds.height * 2) {
+                    console.log(`✅ [Cache-Img] Template verified near cached position (dist: ${distX}, ${distY})`);
+                    if (fs.existsSync(screenshotPath)) fs.unlinkSync(screenshotPath);
+                    return true;
+                } else {
+                    console.log(`⚠️  [Cache-Img] Template found but at different position (dist: ${distX}, ${distY})`);
+                    if (fs.existsSync(screenshotPath)) fs.unlinkSync(screenshotPath);
+                    return false; // Found but position changed
+                }
             }
+
+            console.log(`⚠️  [Cache-Img] Template not found at cached position`);
+            if (fs.existsSync(screenshotPath)) fs.unlinkSync(screenshotPath);
+            return false;
         } finally {
             // Cleanup screenshot
             if (fs.existsSync(screenshotPath)) {

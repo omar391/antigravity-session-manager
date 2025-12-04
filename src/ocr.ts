@@ -73,29 +73,16 @@ async function execCommand(cmd: string, args: string[]): Promise<string> {
 }
 
 /**
- * Capture screenshot using screencapture (macOS)
+ * Capture screenshot using screenshot-desktop (cross-platform: macOS, Windows, Linux)
  */
 export async function captureScreen(outputPath?: string): Promise<string> {
     const screenshotPath = outputPath || path.join(TEMP_DIR, `screenshot-${Date.now()}.png`);
 
     try {
-        // Get actual screen dimensions to capture only the main screen
-        const screenWidth = await screen.width();
-        const screenHeight = await screen.height();
+        const screenshot = require('screenshot-desktop');
 
-        // Use macOS screencapture with explicit region bounds
-        // -R: Capture specific region (x,y,width,height)
-        // -x: Do not play sound
-        const { spawnSync } = require('child_process');
-        const result = spawnSync('screencapture', [
-            '-R', `0,0,${screenWidth},${screenHeight}`,
-            '-x',
-            screenshotPath
-        ]);
-
-        if (result.error) {
-            throw new Error(`screencapture failed: ${result.error}`);
-        }
+        // Capture screen and save directly to file
+        await screenshot({ filename: screenshotPath, format: 'png' });
 
         if (!fs.existsSync(screenshotPath)) {
             throw new Error('Screenshot file was not created');
@@ -634,7 +621,6 @@ export async function findElementCached(
  * @param imageTemplate - Base64 encoded PNG template for image matching
  * @param imageSimilarity - Minimum similarity threshold (0-1), overrides global default
  * @param multiScale - Try multiple scales for resolution independence
- * @param isLearning - true during learning mode to wait for both image+OCR
  * @returns Position {x, y} if found, null otherwise
  */
 export async function findElementWithRetry(
@@ -647,8 +633,7 @@ export async function findElementWithRetry(
     colorFilter?: string,
     imageTemplate?: string,
     imageSimilarity?: number,
-    multiScale?: boolean,
-    isLearning: boolean = false // NEW: true during learning mode to wait for both image+OCR
+    multiScale?: boolean
 ): Promise<{ x: number; y: number; similarity?: number; bounds?: { width: number; height: number }; imageBounds?: { width: number; height: number } } | null> {
     const startTime = Date.now();
 
@@ -706,12 +691,11 @@ export async function findElementWithRetry(
 
         // Run all methods in parallel using the SAME screenshot
         try {
-            const promises: Promise<{ x: number; y: number; similarity?: number; bounds?: { width: number; height: number }; method: string } | null>[] = [];
+            let result: { x: number; y: number; similarity?: number; bounds?: { width: number; height: number }; method: string } | null = null;
 
-            // 1. Image Matching - Try multiple similarity levels in parallel
-            const imagePromises: Promise<{ x: number; y: number; similarity?: number; bounds?: { width: number; height: number }; method: string } | null>[] = [];
+            // 1. Image Matching - Try multiple similarity levels
             if (imageTemplate) {
-                // Generate ALL similarity levels from initial down to min using decay rate
+                // Generate similarity levels from initial down to min using decay rate
                 const similarityLevels: number[] = [];
                 let currentSim = currentSimilarity;
                 while (currentSim >= minSimilarity) {
@@ -723,91 +707,39 @@ export async function findElementWithRetry(
                     similarityLevels.push(minSimilarity);
                 }
 
-                console.log(`🖼️  [Img-Search] Trying ${similarityLevels.length} similarity levels in parallel: ${similarityLevels.map(s => s.toFixed(2)).join(', ')}`);
+                console.log(`🖼️  [Img-Search] Trying ${similarityLevels.length} similarity levels: ${similarityLevels.map(s => s.toFixed(2)).join(', ')}`);
 
-                for (const simLevel of similarityLevels) {
-                    const promise = findElementByImage(screenshotPath, imageTemplate, simLevel, multiScale || false, config)
-                        .then(res => res ? { ...res, method: `image-${simLevel.toFixed(2)}` } : null);
-                    imagePromises.push(promise);
-                    promises.push(promise);
+                // FIX 2: Use Promise.any to get FIRST successful match (early exit)
+                const imagePromises = similarityLevels.map(simLevel =>
+                    findElementByImage(screenshotPath, imageTemplate, simLevel, multiScale || false, config)
+                        .then(res => {
+                            if (res === null) throw new Error('No match');
+                            return { ...res, method: `image-${simLevel.toFixed(2)}` };
+                        })
+                );
+
+                try {
+                    result = await Promise.any(imagePromises);
+                } catch {
+                    // All image searches failed
                 }
             }
 
-            // 2. OCR (Always try)
-            promises.push(tryOCR(screenshotPath).then(res => res ? { ...res, method: 'ocr' } : null));
-
-            let result: { x: number; y: number; similarity?: number; bounds?: { width: number; height: number }; method: string } | null = null;
-
-            if (isLearning) {
-                // Learning mode: Wait for ALL to complete to get real image similarity
-                console.log(`🎓 [Learning] Waiting for both image and OCR to complete...`);
-
-                // Apply timeout to prevent hanging on slow image searches
-                const timeoutPromise = new Promise<never>((_, reject) =>
-                    setTimeout(() => reject(new Error('Learning mode timeout')), config.ocr.learningModeRetryTimeout)
-                );
-
-                let results: PromiseSettledResult<{ x: number; y: number; similarity?: number; bounds?: { width: number; height: number }; method: string } | null>[];
-                try {
-                    results = await Promise.race([
-                        Promise.allSettled(promises),
-                        timeoutPromise
-                    ]) as PromiseSettledResult<{ x: number; y: number; similarity?: number; bounds?: { width: number; height: number }; method: string } | null>[];
-                } catch (e) {
-                    console.log(`⏱️  [Learning] Timeout after ${config.ocr.learningModeRetryTimeout}ms - using partial results`);
-                    // Timeout occurred - no results available
-                    results = [];
-                }
-
-                // Prefer image result (for similarity), fall back to OCR for position
-                const successfulResults = results
-                    .filter((r): r is PromiseFulfilledResult<{ x: number; y: number; similarity?: number; bounds?: { width: number; height: number }; method: string } | null> =>
-                        r.status === 'fulfilled' && r.value !== null
-                    )
-                    .map(r => r.value)
-                    .filter((v): v is { x: number; y: number; similarity?: number; bounds?: { width: number; height: number }; method: string } => v !== null);
-
-                // Prefer image match over OCR (to get real similarity)
-                const imageResult = successfulResults.find(r => r.method.startsWith('image-'));
-                result = imageResult || successfulResults[0] || null;
-
-                if (successfulResults.length > 0) {
-                    console.log(`🎓 [Learning] Completed: ${successfulResults.map(r => r.method).join(', ')}`);
-                }
-            } else {
-                // Runtime: Use first winner for speed
-                try {
-                    result = await Promise.any(promises.map(p => p.then(res => {
-                        if (res === null) throw new Error('Not found');
-                        return res;
-                    })));
-                } catch {
-                    // All failed
+            // FIX 3: Only run OCR if image search failed (in both learning and runtime modes)
+            if (!result) {
+                const ocrResult = await tryOCR(screenshotPath);
+                if (ocrResult) {
+                    result = { ...ocrResult, method: 'ocr' };
                 }
             }
 
             if (result) {
                 console.log(`✅ Winner: ${result.method}`);
 
-                // Get image result separately for bounds preservation
+                // Get image bounds directly from result (no need to wait for other promises)
                 let imageBounds: { width: number; height: number } | undefined;
-                if (imagePromises.length > 0) {
-                    try {
-                        // Wait a bit for image results to complete
-                        const imageResults = await Promise.race([
-                            Promise.all(imagePromises),
-                            new Promise<null[]>((resolve) => setTimeout(() => resolve([]), 100))
-                        ]);
-
-                        if (imageResults) {
-                            const successfulImageResult = imageResults.find(r => r !== null);
-                            if (successfulImageResult?.bounds) {
-                                imageBounds = successfulImageResult.bounds;
-                            }
-                        }
-                    } catch {
-                        // Image match failed or timed out, no bounds
-                    }
+                if (result.bounds && result.method.startsWith('image-')) {
+                    imageBounds = result.bounds;
                 }
 
                 // NORMALIZE COORDINATES: Convert from screenshot pixels to logical points

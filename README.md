@@ -196,8 +196,9 @@ You can safely delete the old files after confirming the new script works.
 | Hardcoded positions | Dynamic detection |
 | Stops at sign-in | Full automation to account selection |
 
-## Known Limitations
+## Platform Support
 
-### macOS Only
-
-Screen capture uses macOS `screencapture` command. For cross-platform support, a library like `screenshot-desktop` would be needed.
+Screen capture uses `screenshot-desktop` for cross-platform support:
+- ✅ **macOS** - Native support
+- ✅ **Windows** - Native support
+- ✅ **Linux** - Requires ImageMagick or scrot

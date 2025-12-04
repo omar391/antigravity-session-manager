@@ -149,6 +149,11 @@ export async function findTemplateInImage(
         resultMat.delete();
         screenshot.delete();
 
+        // Debug: log actual similarity (helps diagnose threshold issues)
+        if (similarity < similarityThreshold) {
+            console.log(`🔍 [Template-Match] Best similarity: ${similarity.toFixed(3)}, threshold: ${similarityThreshold.toFixed(2)}`);
+        }
+
         if (similarity >= similarityThreshold) {
             return {
                 x: minMax.maxLoc.x + template.cols / 2,
