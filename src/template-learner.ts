@@ -186,3 +186,61 @@ export function updateStepAfterMatch(
         return false;
     }
 }
+
+/**
+ * Create or update a dynamic variant for a step
+ * Used when a dynamic field (e.g., {targetEmail}) matches via OCR
+ */
+export function createDynamicVariant(
+    stepID: string,
+    resolvedText: string,
+    x: number,
+    y: number,
+    textBounds: { width: number; height: number },
+    workflowPath: string
+): boolean {
+    try {
+        const content = fs.readFileSync(workflowPath, 'utf-8');
+        const json = JSON.parse(content);
+
+        if (json.workflow && Array.isArray(json.workflow.steps)) {
+            for (const step of json.workflow.steps) {
+                if (step.stepID === stepID && step.dynamic) {
+                    // Initialize variants array if needed
+                    if (!step.variants) {
+                        step.variants = [];
+                    }
+
+                    // Check if variant with this text already exists
+                    const existingVariant = step.variants.find((v: any) => v.text === resolvedText);
+
+                    if (existingVariant) {
+                        // Update existing variant
+                        existingVariant.cachedX = x;
+                        existingVariant.cachedY = y;
+                        existingVariant.textBounds = textBounds;
+                        console.log(`💾 Updated dynamic variant "${resolvedText}" for step "${stepID}"`);
+                    } else {
+                        // Create new variant
+                        step.variants.push({
+                            text: resolvedText,
+                            cachedX: x,
+                            cachedY: y,
+                            textBounds: textBounds
+                        });
+                        console.log(`💾 Created dynamic variant "${resolvedText}" for step "${stepID}"`);
+                    }
+
+                    fs.writeFileSync(workflowPath, JSON.stringify(json, null, 4));
+                    return true;
+                }
+            }
+        }
+
+        console.error(`❌ Could not find dynamic step with ID "${stepID}"`);
+        return false;
+    } catch (error) {
+        console.error(`Failed to create dynamic variant:`, error);
+        return false;
+    }
+}

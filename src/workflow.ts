@@ -3,7 +3,7 @@ import * as path from 'path';
 import { keyboard } from "@nut-tree-fork/nut-js";
 import { findElementWithRetry, captureScreen, findElement, findElementByImage } from './ocr';
 import { clickAt, pressKey, openSettings, wait } from './automation';
-import { captureTemplateForStep, saveTemplateToWorkflow, updateStepAfterMatch } from './template-learner';
+import { captureTemplateForStep, saveTemplateToWorkflow, updateStepAfterMatch, createDynamicVariant } from './template-learner';
 import type { Config, WorkflowStep, WorkflowConfig } from './types';
 import { getEffectiveConfig } from './constants';
 
@@ -85,6 +85,18 @@ export async function executeWorkflow(
                         searchText = targetEmail;
                     }
 
+                    // For dynamic steps, look for a matching variant by resolved text
+                    let activeVariant: WorkflowConfig | undefined;
+                    if (step.dynamic && step.variants && step.variants.length > 0) {
+                        activeVariant = step.variants.find(v => v.text === searchText);
+                        if (activeVariant) {
+                            console.log(`📍 Found cached variant for "${searchText}"`);
+                        }
+                    }
+
+                    // Use variant's cache if available, otherwise fall back to step's cache
+                    const effectiveStep = activeVariant || step;
+
                     if (step.description) {
                         console.log(`🖱️  ${step.description}...`);
                     } else {
@@ -98,59 +110,72 @@ export async function executeWorkflow(
                     const maxWaitTime = step.maxWait || config.workflow.maxWait;
                     const retryIntervalTime = step.retryInterval || config.workflow.retryInterval;
 
-                    // Check if we have cached coordinates in the workflow step
+                    // Check if we have cached coordinates (from variant or step)
                     let position = null;
-                    if (step.cachedX !== undefined && step.cachedY !== undefined) {
-                        console.log(`💾 Found cached position: (${step.cachedX}, ${step.cachedY})`);
+                    if (effectiveStep.cachedX !== undefined && effectiveStep.cachedY !== undefined) {
+                        console.log(`💾 Found cached position: (${effectiveStep.cachedX}, ${effectiveStep.cachedY})`);
 
-                        // Run image and text verification in parallel to minimize latency
-                        const verificationPromises: Promise<boolean>[] = [];
+                        // Run image and OCR verification in parallel, but prioritize image result
+                        let imageVerified = false;
+                        let ocrVerified = false;
 
-                        // Verify image template if available
-                        if (step.imageTemplateBounds && step.imageTemplate) {
+                        const verificationPromises: Promise<{ type: 'image' | 'ocr'; success: boolean }>[] = [];
+
+                        // Image verification (primary)
+                        if (effectiveStep.imageTemplateBounds && effectiveStep.imageTemplate) {
                             verificationPromises.push(
                                 verifyCachedPosition(
-                                    step.cachedX,
-                                    step.cachedY,
-                                    step.imageTemplateBounds,
-                                    step.imageTemplate,
-                                    step.imageSimilarity || config.ocr.defaultThreshold,
+                                    effectiveStep.cachedX,
+                                    effectiveStep.cachedY,
+                                    effectiveStep.imageTemplateBounds,
+                                    effectiveStep.imageTemplate,
+                                    effectiveStep.imageSimilarity || config.ocr.defaultThreshold,
                                     config
-                                )
+                                ).then(success => ({ type: 'image' as const, success }))
                             );
                         }
 
-                        // Verify text if available
-                        if (step.text && step.textBounds) {
+                        // OCR verification (fallback)
+                        if (effectiveStep.textBounds) {
                             verificationPromises.push(
                                 verifyTextAtCachedPosition(
-                                    step.cachedX,
-                                    step.cachedY,
-                                    step.textBounds,
+                                    effectiveStep.cachedX,
+                                    effectiveStep.cachedY,
+                                    effectiveStep.textBounds,
                                     searchText,
                                     config
-                                )
+                                ).then(success => ({ type: 'ocr' as const, success }))
                             );
                         }
 
                         // Wait for all verifications to complete
-                        let isValid = true;
                         if (verificationPromises.length > 0) {
-                            const results = await Promise.all(verificationPromises);
-                            isValid = results.every(r => r); // All must pass
+                            const results = await Promise.allSettled(verificationPromises);
 
-                            if (!isValid) {
+                            for (const result of results) {
+                                if (result.status === 'fulfilled') {
+                                    if (result.value.type === 'image' && result.value.success) {
+                                        imageVerified = true;
+                                    } else if (result.value.type === 'ocr' && result.value.success) {
+                                        ocrVerified = true;
+                                    }
+                                }
+                            }
+
+                            // Image-first, OCR-fallback
+                            if (imageVerified) {
+                                console.log(`✅ Cache verified via image`);
+                                position = { x: effectiveStep.cachedX, y: effectiveStep.cachedY };
+                            } else if (ocrVerified) {
+                                console.log(`✅ Cache verified via OCR (image failed)`);
+                                position = { x: effectiveStep.cachedX, y: effectiveStep.cachedY };
+                            } else {
                                 console.log(`⚠️  Cache verification failed, performing full search`);
                             }
-                        }
-
-                        // Use cache only if verification passed
-                        if (isValid) {
-                            position = { x: step.cachedX, y: step.cachedY };
-                        } else if (verificationPromises.length === 0) {
+                        } else {
                             // No verification possible (legacy cache), use anyway
                             console.log(`⚠️  No bounds/template for verification, using cache without verification`);
-                            position = { x: step.cachedX, y: step.cachedY };
+                            position = { x: effectiveStep.cachedX, y: effectiveStep.cachedY };
                         }
                     }
 
@@ -252,7 +277,7 @@ export async function executeWorkflow(
                                     step.useCache,
                                     boundsToSave,
                                     undefined,
-                                    undefined,
+                                    retryPos.textBounds, // Pass OCR text bounds from learning
                                     retryPos.imageBounds ? retryPos.similarity : undefined // Only pass similarity if from image search
                                 );
 
@@ -389,6 +414,19 @@ export async function executeWorkflow(
                         step.useCache,
                         position.bounds  // Bounds from either image or text matching
                     );
+
+                    // For dynamic steps, create/update a variant with the resolved text
+                    if (step.dynamic && step.stepID && position.bounds) {
+                        const workflowPath = path.join(process.cwd(), 'workflow.json');
+                        createDynamicVariant(
+                            step.stepID,
+                            searchText, // The resolved text (e.g., actual email)
+                            position.x,
+                            position.y,
+                            position.bounds,
+                            workflowPath
+                        );
+                    }
 
                     await clickAt(position.x, position.y);
                     break;
@@ -819,22 +857,59 @@ async function handleLearningModeRetry(
     config: Config,
     retryFn: (template: string) => Promise<{ x: number; y: number; similarity?: number; bounds?: { width: number; height: number }; imageBounds?: { width: number; height: number } } | null>,
     skipSave?: boolean
-): Promise<{ x: number; y: number; similarity?: number; bounds?: { width: number; height: number }; imageBounds?: { width: number; height: number } } | null> {
+): Promise<{ x: number; y: number; similarity?: number; bounds?: { width: number; height: number }; imageBounds?: { width: number; height: number }; textBounds?: { width: number; height: number } } | null> {
     const captureResult = await captureTemplateForStep(stepID);
     if (!captureResult) return null;
 
     const { dataUrl, bounds } = captureResult;
 
-    // Save to file unless caller handles it explicitly
+    // Save image template to workflow.json
     if (!skipSave) {
         const workflowPath = path.join(process.cwd(), 'workflow.json');
         saveTemplateToWorkflow(stepID, dataUrl, bounds, workflowPath);
     }
 
+    // Extract text from captured image using OCR for dual verification
+    let textBounds: { width: number; height: number } | undefined;
+    try {
+        // Decode base64 image, OCR it, find text bounds
+        const Jimp = (await import('jimp')).Jimp;
+        const base64Data = dataUrl.replace(/^data:image\/\w+;base64,/, '');
+        const imageBuffer = Buffer.from(base64Data, 'base64');
+        const image = await Jimp.read(imageBuffer);
+
+        // Save temp file for OCR
+        const tempPath = `/tmp/learning-ocr-${Date.now()}.png` as `${string}.${string}`;
+        await image.write(tempPath);
+
+        // Run OCR on captured image to extract text bounds
+        const { detectText } = await import('./ocr');
+        const ocrResults = await detectText(tempPath);
+
+        // Cleanup temp file
+        const fs = await import('fs');
+        if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+
+        if (ocrResults && ocrResults.length > 0) {
+            // Get bounds of best match (first result with highest confidence)
+            const bestMatch = ocrResults[0];
+            textBounds = { width: bestMatch.width, height: bestMatch.height };
+            console.log(`📝 OCR extracted text bounds: ${textBounds.width}x${textBounds.height}`);
+        }
+    } catch (err) {
+        console.log(`⚠️  OCR extraction failed during learning: ${err}`);
+    }
+
     console.log(`🔄 Retrying step "${stepID}" with new template...`);
 
     // Call the retry function with the captured template
-    return await retryFn(dataUrl);
+    const result = await retryFn(dataUrl);
+
+    // Attach textBounds to result if available
+    if (result && textBounds) {
+        return { ...result, textBounds };
+    }
+    return result;
 }
 
 /**
